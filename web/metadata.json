@@ -1,0 +1,7 @@
+{
+  "name": "GangQing - Industrial Cognitive Decision System",
+  "description": "A high-fidelity industrial AI agent interface for steel mill management, featuring real-time BI, predictive maintenance, and simulation capabilities.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

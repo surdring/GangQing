@@ -1,0 +1,175 @@
+import i18n from 'i18next';
+import { initReactI18next } from 'react-i18next';
+
+const resources = {
+  zh: {
+    translation: {
+      app: {
+        title: '钢擎',
+        simulationMode: '模拟模式',
+        workInProgress: '功能开发中',
+        returnToAgent: '返回对话',
+        moduleNotAvailable: '当前为原型版本，该模块暂不可用。',
+      },
+      sidebar: {
+        commandCenter: '全域指挥舱',
+        agentChat: '智能对话',
+        workOrders: '工单',
+        sandbox: '沙箱',
+        userName: '张三',
+        userTitle: '厂长',
+      },
+      chat: {
+        agentName: '钢擎智能体',
+        you: '你',
+        thinking: '思考中...',
+        inputPlaceholder: '你可以询问生产、设备、成本等问题…',
+        disclaimer: 'AI 可能会出错，请结合证据链核对。',
+        loginError: '登录失败，请确认后端服务已启动。',
+        requestError: '请求失败，请确认后端服务已启动。',
+        missingToken: '缺少访问令牌',
+      },
+      contextPanel: {
+        evidenceChain: '证据链',
+        evidenceChainHint: '点击对话中的可信来源标签，以核验 AI 的依据。',
+        verification: '核验',
+        dataSource: '数据源',
+        confidence: '置信度',
+        keyMetrics: '关键指标',
+        rawLogExtract: '原始日志/提取',
+        auditTrail: '审计轨迹',
+        auditTrailHint: '该数据点已与其他来源交叉校验，用于降低幻觉风险。',
+        viewOriginalReport: '查看原始报表',
+        sources: '来源',
+        confidenceLevels: {
+          High: '高',
+          Medium: '中',
+          Low: '低',
+        },
+      },
+      scenarios: {
+        costAnalysis: '成本分析（F1.1）',
+        costAnalysisDesc: '面向经营/成本口径的自然语言查询与证据链核验。',
+        costAnalysisInit: '请告诉我昨天二号高炉的吨钢成本是多少？对比上个月主要贵在哪里？',
+        diagnostics: '诊断（F2.1）',
+        diagnosticsDesc: '面向设备维修的音频/图像辅助诊断与建议。',
+        diagnosticsInit: '分析这段轧机电机录音，判断可能故障原因并给出建议。',
+        simulation: '仿真（F4.5）',
+        simulationDesc: '沙箱仿真模式：仅做推演，不执行写操作。',
+        simulationInit: '模拟将焦比降低 2% 的影响。',
+        activeScenario: '当前场景：',
+      },
+      language: {
+        zh: '中文',
+        en: 'English',
+      },
+      charts: {
+        costBreakdownTitle: '成本结构拆解（元/吨）',
+        vibrationSpectrumTitle: '振动频谱分析',
+        anomalyDetected: '检测到异常：{{freq}}',
+        valueLabel: '数值',
+        categories: {
+          baseCost: '基础成本',
+          ironOre: '铁矿石',
+          coke: '焦炭',
+          flux: '熔剂',
+          energy: '能耗',
+          total: '合计',
+        },
+      },
+    },
+  },
+  en: {
+    translation: {
+      app: {
+        title: 'GangQing',
+        simulationMode: 'SIMULATION MODE',
+        workInProgress: 'Work in Progress',
+        returnToAgent: 'Return to Agent',
+        moduleNotAvailable: 'This module is not available in this prototype.',
+      },
+      sidebar: {
+        commandCenter: 'Command Center',
+        agentChat: 'Agent Chat',
+        workOrders: 'Work Orders',
+        sandbox: 'Sandbox',
+        userName: 'J. Miller',
+        userTitle: 'Plant Manager',
+      },
+      chat: {
+        agentName: 'GangQing Agent',
+        you: 'You',
+        thinking: 'Thinking...',
+        inputPlaceholder: 'Ask about production, maintenance, or costs...',
+        disclaimer: 'GangQing Agent can make mistakes. Check evidence pills.',
+        loginError: 'Login error. Please check backend server is running.',
+        requestError: 'Request error. Please check backend server is running.',
+        missingToken: 'Missing access token',
+      },
+      contextPanel: {
+        evidenceChain: 'Evidence Chain',
+        evidenceChainHint: "Select a trusted data source pill from the chat to verify the AI's claims.",
+        verification: 'Verification',
+        dataSource: 'Data Source',
+        confidence: 'Confidence',
+        keyMetrics: 'Key Metrics',
+        rawLogExtract: 'Raw Log / Extract',
+        auditTrail: 'Audit Trail',
+        auditTrailHint: 'This data point was cross-referenced with other sources to prevent hallucination.',
+        viewOriginalReport: 'View Original Report',
+        sources: 'Sources',
+        confidenceLevels: {
+          High: 'High',
+          Medium: 'Medium',
+          Low: 'Low',
+        },
+      },
+      scenarios: {
+        costAnalysis: 'Cost Analysis (F1.1)',
+        costAnalysisDesc: 'Natural-language cost query with evidence verification.',
+        costAnalysisInit: "Show me yesterday's ton-steel cost for Blast Furnace #2.",
+        diagnostics: 'Diagnostics (F2.1)',
+        diagnosticsDesc: 'Audio/Image-assisted maintenance diagnostics and recommendations.',
+        diagnosticsInit: 'Analyze this recording from the rolling mill motor.',
+        simulation: 'Simulation (F4.5)',
+        simulationDesc: 'Sandbox simulation mode: propose only, no writes.',
+        simulationInit: 'Simulate reducing coke ratio by 2%.',
+        activeScenario: 'Active Scenario:',
+      },
+      language: {
+        zh: '中文',
+        en: 'English',
+      },
+      charts: {
+        costBreakdownTitle: 'Cost Structure Breakdown (CNY/Ton)',
+        vibrationSpectrumTitle: 'Vibration Spectrum Analysis',
+        anomalyDetected: 'ANOMALY DETECTED: {{freq}}',
+        valueLabel: 'Value',
+        categories: {
+          baseCost: 'Base Cost',
+          ironOre: 'Iron Ore',
+          coke: 'Coke',
+          flux: 'Flux',
+          energy: 'Energy',
+          total: 'Total',
+        },
+      },
+    },
+  },
+} as const;
+
+i18n.use(initReactI18next).init({
+  resources,
+  lng: 'zh',
+  fallbackLng: 'zh',
+  supportedLngs: ['zh', 'en'],
+  nonExplicitSupportedLngs: true,
+  interpolation: {
+    escapeValue: false,
+  },
+  react: {
+    useSuspense: false,
+  },
+});
+
+export default i18n;
