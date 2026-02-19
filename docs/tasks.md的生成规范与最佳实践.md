@@ -14,10 +14,9 @@
  
  `docs/tasks.md` 中每个任务必须能追溯到至少一个权威来源：
  
- - PRD：`docs/产品需求.md`
- - 技术设计（最佳实践版）：`docs/技术设计文档-最佳实践版.md`
- - 对外契约：`docs/contracts/api-and-events-draft.md`
- - API：`docs/api/openapi.yaml`
+ - PRD：`docs/requirements.md`
+ - 技术设计（最佳实践版）：`docs/design.md`
+
  
  **强制规则**：
  
@@ -88,18 +87,7 @@
  - 对外契约如有变更：相关文档与 schema 已同步。
  - 无遗留项：不得存在“TODO/后续补充/已知限制”等。
  
- ### 5.2 验收日志（强制落盘）
- 
- 每完成一个任务（或一个里程碑任务组），必须在 `reports/` 生成验收日志：
- 
- - 命名：`reports/YYYY-MM-DD_T{N}_short-slug.md`
- - 必须包含：
-   - 本次变更范围摘要
-   - 单元测试命令与结果
-   - 冒烟测试命令与结果
-   - 覆盖的关键链路与错误路径
-   - 零遗留项声明
- 
+
  ## 6. GangQing 项目推荐的任务类型模板
  
  ### 6.1 L1 最小闭环（Postgres 造数 + llama.cpp + SSE）

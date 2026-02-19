@@ -315,13 +315,113 @@
 ## 6. 对话流式协议（SSE + WebSocket）
 
 ### 6.1 SSE：`GET /api/v1/chat/stream`
-- 事件必须可分段渲染，建议最小事件集合：
-  - `meta`：包含 `requestId/sessionId`
-  - `token`/`delta`：文本增量
-  - `tool_call`：工具调用开始/结束（脱敏参数摘要）
-  - `evidence`：证据链增量或引用
-  - `error`：结构化错误（ErrorResponse）
-  - `done`：结束
+
+用途：对话流式输出（长耗时场景优先 SSE）。
+
+#### 6.1.1 协议与序列化规则（强制）
+- 响应 `Content-Type`：`text/event-stream`
+- 每条 SSE 事件的 `data:` 必须为**单行 JSON**（禁止多行 JSON），便于客户端稳定解析。
+- 事件类型通过 JSON 字段 `type` 区分（不依赖 SSE 的 `event:` 行）。
+
+#### 6.1.2 SSE 统一 Envelope（强制）
+
+所有事件同形，统一 envelope 字段如下：
+
+- `type`（string，强制）：事件类型枚举，见 6.1.3
+- `timestamp`（string，强制）：ISO 8601 时间戳
+- `requestId`（string，强制）：链路追踪 ID
+- `tenantId`（string，强制）：租户隔离 ID
+- `projectId`（string，强制）：项目隔离 ID
+- `sessionId`（string，可选）：对话会话 ID（若有）
+- `sequence`（number，强制）：单 SSE 连接内单调递增（从 1 开始或从任意正整数开始均可；但必须递增）
+- `payload`（object，强制）：事件负载，与 `type` 对应
+
+约束：
+- 禁止在 `payload` 内重复输出 `requestId/tenantId/projectId/sessionId/sequence/timestamp/type`。
+- 禁止输出无法被 JSON 解析的值（例如 `NaN`/`Infinity`）。
+
+#### 6.1.3 最小事件类型集合（验收必需）
+
+- `meta`：元信息（首事件必须为 `meta`）
+- `progress`：阶段/步骤进度
+- `tool.call`：工具调用开始（参数必须脱敏摘要）
+- `tool.result`：工具调用结束（摘要 + 可选错误 + 可选 evidence 引用）
+- `message.delta`：assistant 文本增量
+- `evidence.update`：证据链增量（append/update/reference）
+- `warning`：非致命降级/不确定项提示
+- `error`：结构化错误（payload 必须同构 ErrorResponse）
+- `final`：结束事件（正常/错误/取消）
+
+#### 6.1.4 各事件 payload 约束（字段级，验收必需）
+
+说明：以下仅定义对外契约形态与字段约束，不包含任何内部实现细节。
+
+##### `meta.payload`
+- `capabilities`（object，强制）
+  - `streaming`（boolean，强制，必须为 true）
+  - `evidenceIncremental`（boolean，强制）
+  - `cancellationSupported`（boolean，强制）
+
+##### `progress.payload`
+- `stage`（string，强制）：阶段名（例如 `intent`/`tooling`/`reasoning`/`finalizing`）
+- `message`（string，强制）：面向用户的阶段提示（允许中文）
+- `stepId`（string，可选）：编排步骤 ID
+
+##### `tool.call.payload`
+- `toolCallId`（string，强制）
+- `toolName`（string，强制）
+- `argsSummary`（object，强制）：脱敏参数摘要（禁止包含密钥与敏感原文）
+
+##### `tool.result.payload`
+- `toolCallId`（string，强制）
+- `toolName`（string，强制）
+- `status`（string，强制）：`success|failure`
+- `resultSummary`（object，可选）：脱敏结果摘要
+- `error`（object，可选）：当 `status=failure` 时必须存在，且必须为统一 ErrorResponse 结构
+- `evidenceRefs`（array，可选）：证据引用（元素为 `evidenceId` 字符串）
+
+##### `message.delta.payload`
+- `delta`（string，强制）：文本增量
+
+##### `evidence.update.payload`
+- `mode`（string，强制）：`append|update|reference`
+- `evidence`（object，可选）：Evidence 对象（见第 3 章 Evidence）
+- `evidenceId`（string，可选）：证据引用 ID
+
+约束：
+- `mode=append|update`：必须包含 `evidence`
+- `mode=reference`：必须包含 `evidenceId`
+
+##### `warning.payload`
+- `code`（string，强制）：稳定码（推荐复用错误码：`EVIDENCE_MISSING`/`EVIDENCE_MISMATCH`/`GUARDRAIL_BLOCKED` 等，或扩展为 warning 专用枚举）
+- `message`（string，强制）：面向用户的提示（允许中文）
+- `details`（object，可选）：结构化上下文（禁止敏感信息）
+
+约束：
+- `warning` 不要求英文 `messageEn`；英文可检索能力由 `code` + 结构化日志字段保障。
+
+##### `error.payload`
+`payload` 必须为统一错误模型 ErrorResponse（见第 2 章），至少包含：
+- `code`（string，强制）
+- `message`（string，强制，必须英文）
+- `details`（object，可选）
+- `retryable`（boolean，强制）
+- `requestId`（string，强制）
+
+##### `final.payload`
+- `status`（string，强制）：`success|error|cancelled`
+- `summary`（object，可选）：脱敏摘要（可用于客户端收尾/归档）
+
+#### 6.1.5 事件序列验收（最小序列，强制）
+
+- 成功路径：`meta` ->（0..n 条任意事件）-> `final(status=success)`
+- 失败路径：`meta` ->（0..n 条任意事件）-> `error` -> `final(status=error)`
+
+约束：
+- `meta` 必须为首事件。
+- `final` 必须为最后一个事件；`final` 之后不得再输出任何事件。
+- 发生错误时必须尽快输出 `error`，并紧随 `final(status=error)` 结束。
+- `sequence` 在同一 SSE 连接内必须单调递增。
 
 验收点：
 - `error` 事件可解析为统一错误模型。

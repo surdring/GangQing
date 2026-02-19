@@ -89,9 +89,9 @@ trigger: always
 ## 4) GangQing 工程约定（约定）
 
 1. **文档权威来源**
-   - 需求（PRD）：`docs/产品需求.md`
-   - 任务（Implementation Plan）：`docs/tasks.md`
-   - 设计（TDD）：`docs/技术设计文档-TDD.md`
+   - 需求（PRD）：`.kiro/specs/gangqing/requirements.md`
+   - 任务（Implementation Plan）：`.kiro/specs/gangqing/tasks.md`
+   - 设计：`.kiro/specs/gangqing/design.md`
 
 2. **工程结构（建议对齐仓库规范）**
    - 本仓库工程结构：

@@ -11,8 +11,8 @@
 3. 然后依次生成 Task {N}.1 到 {N}.M 的 Sub-task Prompts，重点在于具体的文件修改和测试策略。
 
 4. 所有 Context / Constraint 必须与 GangQing 项目上下文一致，并明确引用以下权威文档：
-- PRD: docs/产品需求.md
-- TDD: docs/技术设计文档-TDD.md
+- PRD: docs/requirements.md
+- TDD: docs/design.md
 - tasks: docs/tasks.md
 - contracts: docs/contracts/api-and-events-draft.md
 - api docs: docs/api/*.md
