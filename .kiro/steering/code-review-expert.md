@@ -230,6 +230,7 @@ inclusion: always
 - [ ] **Checklist 完成**：任务 Checklist 是否全部完成
 - [ ] **产出物齐全**：Output 中列出的产物是否全部交付
 - [ ] **验证通过**：Verification 中的断言是否全部通过
+- [ ] **计划对齐**：是否按照任务执行计划/开发计划进行开发；如存在偏离，是否在文档/验收日志中明确记录偏离原因与影响范围（计划文档占位符：`docs/specs/plans/T{N}_<task-slug>-plan-<id>.md`）
 
 #### H2. 自动化验证（基于验收日志）
 - [ ] **后端最低校验**：若变更涉及 `backend/`，验收日志是否记录至少运行并通过 `python -m compileall backend`
@@ -253,16 +254,21 @@ inclusion: always
    - 关联的需求（R#）
    - 前置依赖（T#）
 
-2. **读取设计文档**
+2. **读取任务执行计划/开发计划（如存在）**
+   - 检查实现范围、里程碑、验收标准是否与计划一致
+   - 若偏离，检查是否有明确记录（原因、影响、替代方案）
+   - 计划文档占位符：`docs/specs/plans/T{N}_<task-slug>-plan-<id>.md`
+
+3. **读取设计文档**
    - 相关的设计文档：`docs/技术设计文档-TDD.md`
    - 契约定义与协议草案：`docs/contracts/api-and-events-draft.md`
    - 架构图（如有）
 
-3. **读取全局强制规范（项目红线）**
+4. **读取全局强制规范（项目红线）**
    - 工程与验收规则：`AGENTS.md`
    - 编码规范与错误/契约要求：`docs/coding-standards.md`
 
-4. **读取“文档集成（必须对齐）”清单（缺失/不对齐视为 Blocker）**
+5. **读取“文档集成（必须对齐）”清单（缺失/不对齐视为 Blocker）**
    - `docs/contracts/api-and-events-draft.md`
    - `docs/security/rbac-matrix.md`
    - `docs/security/guardrails-and-kill-switch.md`
@@ -270,7 +276,7 @@ inclusion: always
    - `docs/acceptance/milestone-acceptance-checklist.md`
    - `docs/acceptance/acceptance-evidence-pack.md`
 
-5. **读取 AI-Dev 产出**
+6. **读取 AI-Dev 产出**
    - 代码变更（git diff 或文件列表）
    - 测试代码
    - 文档变更
