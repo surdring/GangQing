@@ -23,6 +23,34 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const apiBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8000';
+  const tenantId = (import.meta as any).env?.VITE_TENANT_ID || 't1';
+  const projectId = (import.meta as any).env?.VITE_PROJECT_ID || 'p1';
+
+  const createRequestId = () => {
+    try {
+      return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    } catch {
+      return `${Date.now()}-${Math.random()}`;
+    }
+  };
+
+  const buildBaseHeaders = (requestId: string) => ({
+    'X-Tenant-Id': tenantId,
+    'X-Project-Id': projectId,
+    'X-Request-Id': requestId,
+  });
+
+  const getErrorCode = async (res: Response): Promise<string | null> => {
+    try {
+      const body = await res.json();
+      const code = (body as any)?.code;
+      return typeof code === 'string' ? code : null;
+    } catch {
+      return null;
+    }
+  };
+
   useEffect(() => {
     // Reset chat when scenario changes
     setMessages([{
@@ -33,11 +61,15 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
     }]);
     setInput(t(activeScenario.initialMessage, { lng: normalizedLanguage }));
     setActiveEvidence(null);
-    setAccessToken(null);
+    try {
+      const persisted = localStorage.getItem('gangqing.accessToken');
+      setAccessToken(persisted && persisted.trim() ? persisted : null);
+    } catch {
+      setAccessToken(null);
+    }
     setUserId('');
     setAttachments([]);
 
-    const apiBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8000';
     const toLoginUser = () => {
       if (activeScenario.role === 'manager') return 'manager';
       if (activeScenario.role === 'scheduler') return 'scheduler';
@@ -47,22 +79,44 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
     const login = async () => {
       try {
         const username = toLoginUser();
-        const res = await fetch(`${apiBaseUrl}/api/v1/login`, {
+        if (accessToken) {
+          setUserId(username);
+          return;
+        }
+        const requestId = createRequestId();
+        const res = await fetch(`${apiBaseUrl}/api/v1/auth/login`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            ...buildBaseHeaders(requestId),
+            'Content-Type': 'application/json',
+          },
           body: JSON.stringify({ username, password: username }),
         });
         if (!res.ok) {
-          throw new Error(`Login failed (${res.status})`);
+          const code = await getErrorCode(res);
+          if (res.status === 401 || code === 'AUTH_ERROR') {
+            throw new Error('AUTH_ERROR');
+          }
+          throw new Error(`LOGIN_FAILED_${res.status}`);
         }
         const data = await res.json();
-        setAccessToken(data.access_token);
-        setUserId(data.user_id);
+        const token = (data as any)?.accessToken;
+        if (typeof token !== 'string' || !token.trim()) {
+          throw new Error('MISSING_TOKEN');
+        }
+        setAccessToken(token);
+        setUserId(username);
+        try {
+          localStorage.setItem('gangqing.accessToken', token);
+        } catch {
+          // ignore
+        }
       } catch (e) {
+        const errMsg = String((e as any)?.message || e);
         setMessages(prev => ([...prev, {
           id: `err-${Date.now()}`,
           role: 'assistant',
-          content: t('chat.loginError'),
+          content: errMsg === 'AUTH_ERROR' ? t('chat.authError') : t('chat.loginError'),
           timestamp: Date.now(),
         }]));
       }
@@ -76,8 +130,6 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
   };
 
   const handleUploadFile = async (file: File) => {
-    const apiBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8000';
-
     if (!accessToken) {
       throw new Error(t('chat.missingToken'));
     }
@@ -85,9 +137,11 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
     const form = new FormData();
     form.append('file', file);
 
+    const requestId = createRequestId();
     const res = await fetch(`${apiBaseUrl}/api/v1/upload`, {
       method: 'POST',
       headers: {
+        ...buildBaseHeaders(requestId),
         'Authorization': `Bearer ${accessToken}`,
       },
       body: form,
@@ -121,15 +175,15 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
     setIsProcessing(true);
 
     try {
-      const apiBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8000';
-
       if (!accessToken) {
         throw new Error(t('chat.missingToken'));
       }
 
+      const requestId = createRequestId();
       const res = await fetch(`${apiBaseUrl}/api/v1/chat`, {
         method: 'POST',
         headers: {
+          ...buildBaseHeaders(requestId),
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${accessToken}`,
         },
@@ -144,7 +198,14 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
       });
 
       if (!res.ok) {
-        throw new Error(`Chat failed (${res.status})`);
+        const code = await getErrorCode(res);
+        if (res.status === 401 || code === 'AUTH_ERROR') {
+          throw new Error('AUTH_ERROR');
+        }
+        if (res.status === 403 || code === 'FORBIDDEN') {
+          throw new Error('FORBIDDEN');
+        }
+        throw new Error(`CHAT_FAILED_${res.status}`);
       }
 
       const data = await res.json();
@@ -163,10 +224,26 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
       setMessages(prev => [...prev, responseMsg]);
       setAttachments([]);
     } catch (e) {
+      const errMsg = String((e as any)?.message || e);
+      const content =
+        errMsg === 'AUTH_ERROR'
+          ? t('chat.authError')
+          : errMsg === 'FORBIDDEN'
+            ? t('chat.forbidden')
+            : t('chat.requestError');
+
+      if (errMsg === 'AUTH_ERROR') {
+        try {
+          localStorage.removeItem('gangqing.accessToken');
+        } catch {
+          // ignore
+        }
+        setAccessToken(null);
+      }
       setMessages(prev => ([...prev, {
         id: `err-${Date.now()}`,
         role: 'assistant',
-        content: t('chat.requestError'),
+        content,
         timestamp: Date.now(),
       }]));
     } finally {

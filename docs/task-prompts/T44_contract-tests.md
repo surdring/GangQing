@@ -28,6 +28,23 @@
 - Unit: `pytest -q && npm -C web test`
 - Smoke: `backend/scripts/contract_tests_smoke_test.py`
 
+# 联调检查清单（契约/联调门禁）
+- [ ] `docs/contracts/api-and-events-draft.md` 是否被视为对外契约的单一事实源（任何实现/测试以它为准）？
+- [ ] 是否同时覆盖以下对象的 schema 断言：
+  - [ ] REST 响应（HTTP 状态码 + body）
+  - [ ] SSE 事件 envelope（统一字段 + payload）
+  - [ ] Evidence（claims/citations/lineage/tool traces 的字段完整性）
+  - [ ] ErrorResponse（`code/message(英文)/details?/retryable/requestId`）
+- [ ] SSE 事件类型枚举是否与契约一致（不多不少），至少包含：`progress/tool.call/tool.result/message.delta/evidence.update/warning/error/final`？
+- [ ] `message.delta` 是否允许多次出现，且每次为增量片段（契约/测试需覆盖“多 delta”场景）？
+- [ ] `evidence.update` 是否允许多次出现，且为增量合并语义（契约/测试需覆盖“多 update”场景）？
+- [ ] 契约失败时是否统一映射为 `CONTRACT_VIOLATION`，并在 `details` 中给出字段路径/原因摘要（禁止敏感信息）？
+- [ ] 前端 Zod 校验失败时是否进入结构化错误路径（可观测、可定位 requestId），而不是 console.warn 后继续渲染？
+- [ ] `backend/scripts/contract_tests_smoke_test.py` 是否满足“真实服务 No Skip”：
+  - [ ] 真实 FastAPI + 真实 Postgres + 真实 llama.cpp（或按当前阶段的真实推理服务）
+  - [ ] 配置缺失 => 测试失败（英文错误消息）
+  - [ ] 至少覆盖 1 个成功链路 + 1 个失败链路（错误模型可解析）
+
 # Output Requirement
 输出执行蓝图，禁止写代码。
 ```
@@ -57,7 +74,11 @@
 - **Smoke**: `backend/scripts/contract_tests_smoke_test.py`
 
 # Output Requirement
-输出修改文件完整内容 + 测试命令与关键输出。
+交付方式：**摘要 + 关键片段 + 文件路径**（禁止在聊天中粘贴大文件全文）。
+- 摘要：说明本次修改了哪些文件、哪些章节/段落发生变更。
+- 关键片段：仅粘贴与本子任务契约/实现要求直接相关的最小必要片段。
+- 文件路径：给出修改后的文件路径，作为权威落盘产物（以仓库文件为准）。
+- 输出验证命令与关键输出摘要（文本）。
 ```
 
 ---

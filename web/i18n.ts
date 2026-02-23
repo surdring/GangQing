@@ -27,6 +27,8 @@ const resources = {
         disclaimer: 'AI 可能会出错，请结合证据链核对。',
         loginError: '登录失败，请确认后端服务已启动。',
         requestError: '请求失败，请确认后端服务已启动。',
+        authError: '认证失败（AUTH_ERROR），请重新登录或检查租户/项目配置。',
+        forbidden: '权限不足（FORBIDDEN），请切换角色或申请权限。',
         missingToken: '缺少访问令牌',
       },
       contextPanel: {
@@ -104,6 +106,8 @@ const resources = {
         disclaimer: 'GangQing Agent can make mistakes. Check evidence pills.',
         loginError: 'Login error. Please check backend server is running.',
         requestError: 'Request error. Please check backend server is running.',
+        authError: 'Authentication failed (AUTH_ERROR). Please login again or check tenant/project configuration.',
+        forbidden: 'Permission denied (FORBIDDEN). Please switch role or request access.',
         missingToken: 'Missing access token',
       },
       contextPanel: {

@@ -23,9 +23,9 @@ class Change:
     reason: str
 
 
-_SUBTASK_HEADING_RE = re.compile(r"^###\\s+Task\\s+(\\d+)\\.(\\d+)\\b")
-_CODE_FENCE_START_RE = re.compile(r"^```markdown\\s*$")
-_CODE_FENCE_END_RE = re.compile(r"^```\\s*$")
+_SUBTASK_HEADING_RE = re.compile(r"^###\s+Task\s+(\d+)\.(\d+)\b")
+_CODE_FENCE_START_RE = re.compile(r"^```markdown\s*$")
+_CODE_FENCE_END_RE = re.compile(r"^```\s*$")
 
 
 def _replace_output_requirement_in_codeblock(lines: list[str]) -> tuple[list[str], bool]:
@@ -55,6 +55,15 @@ def _replace_output_requirement_in_codeblock(lines: list[str]) -> tuple[list[str
 
 def process_file(file_path: Path) -> Change:
     raw = file_path.read_text(encoding="utf-8")
+    new_raw, changed = transform_text(raw)
+    if not changed:
+        return Change(file_path=file_path, changed=False, reason="no_change")
+
+    file_path.write_text(new_raw, encoding="utf-8")
+    return Change(file_path=file_path, changed=True, reason="updated_output_requirement")
+
+
+def transform_text(raw: str) -> tuple[str, bool]:
     lines = raw.splitlines(keepends=True)
 
     out: list[str] = []
@@ -99,11 +108,7 @@ def process_file(file_path: Path) -> Change:
         i += 1
 
     new_raw = "".join(out)
-    if new_raw == raw:
-        return Change(file_path=file_path, changed=False, reason="no_change")
-
-    file_path.write_text(new_raw, encoding="utf-8")
-    return Change(file_path=file_path, changed=True, reason="updated_output_requirement")
+    return new_raw, changed_any and (new_raw != raw)
 
 
 def main() -> int:
@@ -130,17 +135,24 @@ def main() -> int:
 
     changes: list[Change] = []
     for file_path in md_files:
+        raw = file_path.read_text(encoding="utf-8")
+        new_raw, changed = transform_text(raw)
         if args.dry_run:
-            before = file_path.read_text(encoding="utf-8")
-            c = process_file(file_path)
-            after = file_path.read_text(encoding="utf-8")
-            if before != after:
-                file_path.write_text(before, encoding="utf-8")
-                changes.append(Change(file_path=file_path, changed=True, reason="would_change"))
-            else:
-                changes.append(Change(file_path=file_path, changed=False, reason="no_change"))
-        else:
-            changes.append(process_file(file_path))
+            changes.append(
+                Change(
+                    file_path=file_path,
+                    changed=changed,
+                    reason="would_change" if changed else "no_change",
+                )
+            )
+            continue
+
+        if not changed:
+            changes.append(Change(file_path=file_path, changed=False, reason="no_change"))
+            continue
+
+        file_path.write_text(new_raw, encoding="utf-8")
+        changes.append(Change(file_path=file_path, changed=True, reason="updated_output_requirement"))
 
     changed = [c for c in changes if c.changed]
     print(f"Total files: {len(changes)}")

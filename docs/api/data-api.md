@@ -18,13 +18,15 @@
 
 ### 错误模型
 
-对外错误使用结构化 `AppError`（与 `docs/contracts/api-and-events-draft.md` 对齐）：
+对外错误使用结构化 `ErrorResponse`（与 `docs/contracts/api-and-events-draft.md` 对齐）：
 
 - `code`：稳定错误码
 - `message`：英文错误消息（便于日志检索）
-- `details`：结构化上下文（禁止敏感信息）
+- `details?`：结构化上下文（禁止敏感信息）
 - `retryable`：是否可重试
 - `requestId`：链路追踪 ID
+
+约束：`ErrorResponse` 仅包含以上字段；`tenantId/projectId/sessionId` 等上下文字段通过请求头、SSE envelope、审计与结构化日志贯穿，不在错误响应体中重复输出。
 
 常见错误码：
 

@@ -26,6 +26,27 @@
 - Unit: `npm -C web test`
 - Smoke: `npm -C web run build && backend/scripts/web_sse_e2e_smoke_test.py`
 
+# 联调检查清单（Context Panel）
+- [ ] Context Panel 的输入模型是否来源于“已校验”的数据（Zod 校验通过的 SSE 事件 payload 或 REST 响应），禁止直接渲染未校验的 `unknown`？
+- [ ] 是否与后端事件对齐并能正确处理：
+  - [ ] `evidence.update`（证据增量更新，可能多次出现）
+  - [ ] `warning`（证据不足/不可验证/降级原因）
+  - [ ] `final`（结束后证据面板状态稳定，不再闪烁/回退）
+- [ ] evidence 增量合并策略是否明确（不会因为后续 update 缺字段导致“覆盖丢失”）？
+- [ ] 是否只展示“可追溯证据”：
+  - [ ] citations 至少包含数据源标识（source_system 或等价字段）
+  - [ ] citations 必须包含 `time_range`
+  - [ ] citations 必须包含 `extracted_at`
+  - [ ] 涉及计算的结论是否展示 `lineage_version`（或按契约字段名）
+- [ ] 当 evidence 不完整/缺失时，是否明确显示降级态（例如：缺证据、不可验证、仅展示数据与来源），并避免渲染出“看似可信”的引用？
+- [ ] 当后端返回结构化错误（`error` 事件或 REST 错误）时，Context Panel 是否：
+  - [ ] 不展示半成品伪证据
+  - [ ] 保留 `requestId`（便于审计/排障）
+- [ ] `backend/scripts/web_sse_e2e_smoke_test.py` 是否至少覆盖：
+  - [ ] 正常链路含 `evidence.update`（如当前阶段支持）
+  - [ ] 缺证据链路输出 `warning` 并在 UI 可见
+  - [ ] 错误链路结构化 `error` 可解析且包含 `requestId`
+
 # Output Requirement
 输出执行蓝图，禁止写代码。
 ```
@@ -53,7 +74,11 @@
 - **Smoke**: `backend/scripts/web_sse_e2e_smoke_test.py`
 
 # Output Requirement
-输出修改文件完整内容 + 测试命令。
+交付方式：**摘要 + 关键片段 + 文件路径**（禁止在聊天中粘贴大文件全文）。
+- 摘要：说明本次修改了哪些文件、哪些章节/段落发生变更。
+- 关键片段：仅粘贴与本子任务契约/实现要求直接相关的最小必要片段。
+- 文件路径：给出修改后的文件路径，作为权威落盘产物（以仓库文件为准）。
+- 输出验证命令与关键输出摘要（文本）。
 ```
 
 ---

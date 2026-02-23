@@ -18,12 +18,14 @@
   - `{"total": <int>, "items": <list>}`
 
 ### 错误模型
-对外错误使用结构化 `AppError`：
+对外错误使用结构化 `ErrorResponse`（以 `docs/contracts/api-and-events-draft.md` 为权威来源）：
 - `code`：稳定错误码
 - `message`：英文错误消息（便于日志检索）
-- `details`：结构化上下文
+- `details?`：结构化上下文
 - `retryable`：是否可重试
 - `requestId`：链路追踪 ID
+
+约束：`ErrorResponse` 仅包含以上字段；`tenantId/projectId/sessionId` 等上下文字段通过请求头、SSE envelope、审计与结构化日志贯穿，不在错误响应体中重复输出。
 
 常见错误码：
 - `VALIDATION_ERROR`：参数/格式不合法
@@ -102,9 +104,7 @@ curl -X POST \
   "message": "Missing tenantId or projectId",
   "details": {"tenantId": null, "projectId": null},
   "retryable": false,
-  "requestId": "req-001",
-  "tenantId": null,
-  "projectId": null
+  "requestId": "req-001"
 }
 ```
 
@@ -174,9 +174,7 @@ curl -X POST \
         "message": "Cross-scope access denied: ...",
         "details": {"resource": "semantic:equipment", "unified_id": "EQ-cross"},
         "retryable": false,
-        "requestId": "req-003",
-        "tenantId": "tenant-a",
-        "projectId": "project-a"
+        "requestId": "req-003"
       }
     }
   ]
@@ -213,9 +211,7 @@ curl -X GET \
   "message": "Equipment not found for unified_id",
   "details": {"unified_id": "EQ-404"},
   "retryable": false,
-  "requestId": "req-004",
-  "tenantId": "tenant-a",
-  "projectId": "project-a"
+  "requestId": "req-004"
 }
 ```
 

@@ -121,7 +121,7 @@ inclusion: always
 - [ ] **Schema 定义**：前端对外契约是否有 Zod schema；后端对外契约是否有 Pydantic 模型
 - [ ] **文档同步**：契约/协议是否与仓库文档一致：
   - `docs/contracts/api-and-events-draft.md`
-  - `docs/技术设计文档-TDD.md`
+  - `docs/design.md`
   - 任务/验收约束：`docs/tasks.md`、`docs/acceptance/`
 - [ ] **版本管理**：契约变更是否有版本标记（避免破坏性变更）
 - [ ] **示例数据**：是否提供了契约的示例数据（便于理解）

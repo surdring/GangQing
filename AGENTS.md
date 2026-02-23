@@ -89,18 +89,28 @@ trigger: always
 ## 4) GangQing 工程约定（约定）
 
 1. **文档权威来源**
-   - 需求（PRD）：`.kiro/specs/gangqing/requirements.md`
-   - 任务（Implementation Plan）：`.kiro/specs/gangqing/tasks.md`
-   - 设计：`.kiro/specs/gangqing/design.md`
+   - 需求（PRD）：`docs/requirements.md`
+   - 任务（Implementation Plan）：`docs/tasks.md`
+   - 设计：`docs/design.md`
 
-2. **工程结构（建议对齐仓库规范）**
+2. **Python 虚拟环境（强制）**
+   - **强制使用项目根目录的 `.venv`** 作为 Python 虚拟环境；禁止直接使用系统 Python 或用户全局 site-packages。
+   - 开发者本地创建（示例）：`python -m venv .venv`
+   - 激活方式（示例）：
+     - Linux/macOS：`source .venv/bin/activate`
+   - **命令规范（强制）**：
+     - 运行 Python/pytest/脚本时必须确保解析到 `.venv` 中的解释器与依赖（例如 `which python` 指向 `.venv/bin/python`）。
+     - 安装依赖时必须使用 `.venv` 中的 `pip`（例如 `python -m pip ...` 且 `python` 来自 `.venv`）。
+   - **验证命令执行要求（强制）**：当你在 IDE/终端执行 `pytest`、`python -m compileall`、`backend/scripts/*.py` 等验证命令时，必须在 `.venv` 已激活或明确使用 `.venv/bin/python` 的前提下执行，以保证结果可复现。
+
+3. **工程结构（建议对齐仓库规范）**
    - 本仓库工程结构：
      - `backend/`：FastAPI 后端（API、鉴权、审计、工具链等）
      - `web/`：前端（Vite + React + TypeScript）
      - `docs/`：文档体系（PRD/TDD/任务拆解/RTM/验收）
      - `reports/`：验收日志与审查报告
 
-3. **默认验证命令（若任务未单独指定）**
+4. **默认验证命令（若任务未单独指定）**
    - 后端（`backend/`，Python/FastAPI）：
      - 优先运行任务内指定命令。
      - 若任务未指定：
@@ -111,7 +121,7 @@ trigger: always
      - 优先运行任务内指定命令；否则运行 `npm run build`（在 `web/` 目录）。
    - 若对应目录未提供可运行脚本或依赖缺失，必须在验收日志中明确说明原因与补验收计划，**不得**直接标记完成。
 
-4. **全局编码规范（强制）**
+5. **全局编码规范（强制）**
    - TypeScript Strict（**禁止 `any`**）
    - 契约与校验（单一事实源）：
      - 前端/TypeScript：对外输入输出使用 **Zod** 校验并从 schema 推导类型
@@ -119,11 +129,11 @@ trigger: always
    - 错误消息（message）必须用 **英文**（便于日志搜索）；注释可中文
    - API 使用 **REST**；如采用流式输出，优先使用 **Server-Sent Events (SSE)**，并确保事件/分片协议可契约化校验
 
-5. **自动化验收原则（强制）**
+6. **自动化验收原则（强制）**
    - 每个任务的 Verification 优先写成**可自动化断言**（单元/集成/契约测试），避免仅“手工目测”。
    - 契约相关（REST/SSE/Events/Streaming/Citation/Error）以本仓库 `docs/` 下的权威设计文档为准，并使用 schema 做断言（前端 Zod / 后端 Pydantic）。
 
-6. **真实集成原则（强制）**
+7. **真实集成原则（强制）**
    - **所有代码必须使用真实服务进行集成和测试**
    - **所有测试必须针对真实服务运行**（如 RAGFlow、数据库、外部 API）
    - **禁止使用 mock**：不得使用 mock 对象、mock 服务、stub 等模拟真实服务的方式进行测试
@@ -136,11 +146,15 @@ trigger: always
      - **环境问题必须解决**：测试失败时必须修复环境配置或服务可用性，而非跳过测试
    - 集成测试必须验证完整的端到端流程
 
-7. **配置化开发原则（强制）**
+ 8. **配置化开发原则（强制）**
    - **所有配置必须外部化**：URL、端口、超时时间、重试次数、API 密钥等配置项必须通过环境变量或配置文件管理
    - **禁止硬编码配置值**：代码中不得出现硬编码的 URL（如 `http://localhost:9999`）、端口号、超时时间、魔法数字等配置值
    - **使用统一的配置加载机制**：所有模块必须通过统一的配置加载函数（如 `loadRagflowConfig()`）获取配置，确保配置来源一致
    - **配置必须有 Zod 校验**：所有配置项必须定义 Zod schema 并在加载时校验，确保类型安全和完整性
+   - **本地开发 `.env.local`（强制）**：
+     - 配置读取优先级必须为：**进程环境变量** > **仓库根目录 `.env.local`**。
+     - 运行时不得通过交互式提问来获取关键配置；关键配置缺失必须直接失败，并给出清晰的英文错误消息（例如缺少 `GANGQING_DATABASE_URL`）。
+     - `.env.local` 仅用于本地开发与测试，不得提交到仓库；`.env.example` 必须完整列举所有必需与可选配置项。
    - **配置缺失时的处理**：
      - 开发/测试阶段：当检测到配置文件（`.env.local`）缺少必需的配置项时，AI 必须主动询问用户并协助补充配置
      - 运行时：关键配置缺失时必须抛出清晰的英文错误消息，说明缺失的配置项名称和获取方式

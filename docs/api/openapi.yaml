@@ -12,17 +12,69 @@
         ],
         "summary": "Health",
         "operationId": "health_api_v1_health_get",
+        "parameters": [
+          {
+            "name": "X-Request-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Request-Id"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-Project-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Project-Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object",
-                  "title": "Response Health Api V1 Health Get"
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2221,6 +2273,218 @@
   },
   "components": {
     "schemas": {
+      "ErrorResponse": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable"
+          },
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "retryable",
+          "requestId"
+        ],
+        "title": "ErrorResponse"
+      },
+      "HealthDependencyDetails": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "errorClass": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errorclass"
+          },
+          "missingKeys": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Missingkeys"
+          }
+        },
+        "type": "object",
+        "title": "HealthDependencyDetails"
+      },
+      "HealthDependency": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "postgres",
+              "llama_cpp",
+              "provider",
+              "model",
+              "config"
+            ],
+            "title": "Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "unavailable"
+            ],
+            "title": "Status"
+          },
+          "critical": {
+            "type": "boolean",
+            "title": "Critical"
+          },
+          "latencyMs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latencyms"
+          },
+          "checkedAt": {
+            "type": "string",
+            "title": "Checkedat"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthDependencyDetails"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "critical",
+          "checkedAt"
+        ],
+        "title": "HealthDependency"
+      },
+      "VersionInfo": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "apiVersion": {
+            "type": "string",
+            "title": "Apiversion"
+          },
+          "build": {
+            "type": "string",
+            "title": "Build"
+          },
+          "commit": {
+            "type": "string",
+            "title": "Commit"
+          },
+          "startedAt": {
+            "type": "string",
+            "title": "Startedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "apiVersion",
+          "build",
+          "commit",
+          "startedAt"
+        ],
+        "title": "VersionInfo"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ],
+            "title": "Status"
+          },
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          },
+          "version": {
+            "$ref": "#/components/schemas/VersionInfo"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/HealthDependency"
+            },
+            "type": "array",
+            "title": "Dependencies"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "requestId",
+          "version",
+          "dependencies"
+        ],
+        "title": "HealthResponse"
+      },
       "ChatRequest": {
         "properties": {
           "session_id": {

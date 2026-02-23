@@ -38,6 +38,16 @@
 - `retryable`：是否可重试
 - `requestId`：链路追踪 ID（强制）
 
+ 约束：
+ - 对外 `ErrorResponse` **仅允许**以上 5 个字段；禁止额外输出 `tenantId/projectId/sessionId` 等上下文字段（这些字段应通过请求头、SSE envelope、审计事件与结构化日志贯穿）。
+ - 对外错误模型统一命名为 `ErrorResponse`（文档中不再并列使用 `AppError` 作为对外模型名）。
+
+#### 2.1.0 REST 与 SSE 错误同构规则（强制）
+
+- REST：任意非 2xx 响应体必须为 `ErrorResponse`。
+- SSE：当 `type=error` 时，其 `payload` 必须为 `ErrorResponse`。
+- SSE：当 `type=tool.result` 且 `status=failure` 时，`payload.error` 必须为 `ErrorResponse`。
+
 #### 2.1.1 错误码枚举（最小集合，验收必需）
 
 | code | 触发场景（示例） | retryable | 客户端建议 |
@@ -58,6 +68,68 @@
 - 任意接口失败时均返回 ErrorResponse 结构（非裸字符串）。
 - `message` 英文且可用于日志检索。
 - `requestId` 必须存在且与审计事件可关联。
+
+## 2.2.1 `GET /api/v1/health`（健康检查）
+
+用途：
+- 运行态自检与发布门禁探针。
+- 汇总系统整体状态（`healthy`/`degraded`/`unhealthy`）与依赖探测结果（Postgres / llama.cpp / provider / model / config）。
+- **不泄露敏感信息**（密钥、连接串、内部堆栈、上游响应正文等）。
+
+请求头：
+- `X-Tenant-Id`（必须）
+- `X-Project-Id`（必须）
+- `X-Request-Id`（可选；未传入则服务端生成并在响应头/响应体中回传）
+
+响应头：
+- `X-Request-Id`：总是返回（与响应体 `requestId` 一致）
+
+响应体：`HealthResponse`
+
+字段：
+- `status`：`healthy | degraded | unhealthy`
+- `requestId`：本次请求链路 ID
+- `version`：版本信息
+  - `service`：服务名（建议由 CI 注入）
+  - `apiVersion`：固定为 `v1`
+  - `build`：构建号（建议由 CI 注入）
+  - `commit`：提交 SHA（建议由 CI 注入）
+  - `startedAt`：服务进程启动时间（UTC ISO 8601）
+- `dependencies[]`：依赖探测列表
+  - `name`：`config | postgres | llama_cpp | provider | model`
+  - `status`：`ok | degraded | unavailable`
+  - `critical`：是否关键依赖（关键依赖不可用 => overall `unhealthy`）
+  - `latencyMs?`：探测耗时（毫秒），可能为 `null`
+  - `checkedAt`：探测时间（UTC ISO 8601）
+  - `details?`：失败/降级的结构化摘要（**禁止敏感信息**）
+    - `reason?`：稳定原因枚举/字符串（示例：`not_configured` / `not_configured_model_provider_required` / `timeout` / `connection_failed` / `unexpected_response` / `no_model_provider_online`）
+    - `errorClass?`：异常类型名（例如 `ReadTimeout`、`ConnectTimeout`）
+    - `missingKeys?`：缺失的环境变量名列表（仅 key 名，不得包含值）
+
+状态码策略（强制）：
+- `200`：整体状态为 `healthy` 或 `degraded`
+- `503`：整体状态为 `unhealthy`
+- `401`：缺少 `X-Tenant-Id` 或 `X-Project-Id`（返回 `ErrorResponse(code=AUTH_ERROR)`）
+
+错误码：
+- `AUTH_ERROR`：缺少/无效 scope headers（tenant/project）
+
+敏感信息约束（强制）：
+- 对外 `HealthResponse.dependencies[].details` **不得**包含：
+  - 数据库连接串（例如 `postgresql://...`）
+  - 密钥/Token（例如以 `sk-`/`nvapi-` 开头的 API key）
+  - 明文密码/secret
+  - 内部异常堆栈与上游返回正文
+
+验收要点：
+- 单元测试必须覆盖：
+  - 成功路径
+  - 缺 headers => `401` 且响应体为 `ErrorResponse`
+  - 模型提供者全不可用 => overall `503`
+  - 超时场景的 `details.reason=timeout` 且 `errorClass` 填充
+- 冒烟测试必须覆盖：
+  - 成功路径（输出稳定标志 `healthcheck_ok`）
+  - 至少一个失败路径（例如缺少 `X-Tenant-Id` => `401`）
 
 ## 2.3 语义层 API（Semantic API）契约要点（验收必需）
 
@@ -264,6 +336,36 @@
 - `validation`：`verifiable`/`not_verifiable`/`out_of_bounds`/`mismatch`
 - `redactions?`：脱敏说明（可选）
 
+#### 3.1.1 字段级约束（验收必需）
+- `timeRange`：必须包含 `start` 与 `end`，且 `end > start`。
+- `dataQualityScore?`：若存在，取值范围必须为 `0.0..1.0`。
+- `sourceLocator`：必须足以定位到来源（表/接口/文档路径/记录 ID 等），且禁止包含密钥/凭证/敏感原值。
+
+#### 3.1.2 `validation` 语义（强制）
+- `verifiable`：证据可追溯且与结论一致。
+- `not_verifiable`：无法验证（例如证据缺失、时间范围缺失、或因权限/脱敏导致无法复核）。
+- `out_of_bounds`：触发物理边界/变化率边界等 guardrail（不一定表示“数据为假”，但表示不满足安全/一致性要求）。
+- `mismatch`：证据与结论不一致（例如口径/时间窗/来源冲突，或同一指标多来源互斥且无法裁决）。
+
+#### 3.1.3 Evidence 降级规则（强制）
+- 当结论依赖的 Evidence 存在任意一条 `validation != verifiable` 时：
+  - 必须输出至少 1 条 `warning` 事件，且 `warning.payload.code` 应复用稳定码（例如 `EVIDENCE_MISSING`、`EVIDENCE_MISMATCH`、`GUARDRAIL_BLOCKED`）。
+  - 最终输出不得把不可验证/不一致的数值包装为“确定性结论”；必须以降级语义呈现（例如“仅展示数据与来源/不确定项”）。
+- 当无法为关键数值结论提供任何可追溯 Evidence 时：
+  - 必须降级，不得输出确定性数值；并输出 `warning`（推荐 `EVIDENCE_MISSING`）。
+
+#### 3.1.4 `redactions`（脱敏说明）建议结构（SHOULD）
+
+`redactions` 建议为结构化对象，用于审计与前端提示（仅说明“发生了什么脱敏”，不得泄露原值），例如：
+
+```json
+{"reason":"masked_by_role_policy","policyId":"rbac-finance-v1","fields":["unit_cost"]}
+```
+
+约束：
+- `redactions` **不得**包含被脱敏字段的原始值。
+- `redactions` **不得**包含任何密钥/凭证。
+
 ### 3.2 Evidence 验收点
 - 数值结论必须能关联至少一个 Evidence。
 - 证据缺失/不可验证必须触发降级提示，禁止伪造证据。
@@ -391,6 +493,11 @@
 约束：
 - `mode=append|update`：必须包含 `evidence`
 - `mode=reference`：必须包含 `evidenceId`
+
+映射规则（强制）：
+- `mode=append`：新增一条 Evidence；`payload.evidence` 必须满足 3.1 的最小字段集合与字段级约束。
+- `mode=update`：更新既有 Evidence；`payload.evidence` 必须包含 `evidenceId`，并以 `evidenceId` 作为幂等键。
+- `mode=reference`：仅引用；前端可按需通过证据链检索接口拉取详情（本草案不强制要求在线回查）。
 
 ##### `warning.payload`
 - `code`（string，强制）：稳定码（推荐复用错误码：`EVIDENCE_MISSING`/`EVIDENCE_MISMATCH`/`GUARDRAIL_BLOCKED` 等，或扩展为 warning 专用枚举）

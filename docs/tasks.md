@@ -30,7 +30,7 @@
   - 验证（冒烟测试）：`backend/scripts/auth_smoke_test.py`
   - _Requirements: docs/requirements.md#R1.1, docs/requirements.md#R1.2, docs/design.md#3.1_
 
-- [ ] 4. 落地数据域隔离与脱敏策略（默认过滤 + 字段级脱敏 + 可审计）
+- [x] 4. 落地数据域隔离与脱敏策略（默认过滤 + 字段级脱敏 + 可审计）
 
   - 数据域过滤：在工具层强制叠加（多租户/产线/项目维度按配置）
   - 脱敏：按角色配置字段白名单与脱敏规则；证据链展示默认脱敏
@@ -39,7 +39,7 @@
   - 验证（冒烟测试）：`backend/scripts/rbac_and_masking_smoke_test.py`
   - _Requirements: docs/requirements.md#R1.3, docs/requirements.md#R10.2, docs/design.md#4.4_
 
-- [ ] 5. 设计并落地 Postgres 最小数据模型（维表/事实表/口径仓库/审计表）
+- [x] 5. 设计并落地 Postgres 最小数据模型（维表/事实表/口径仓库/审计表）
 
   - 数据库：实现初始化迁移（表、索引、约束）
   - 表覆盖：设备/物料维表；产量/能耗/成本事实；报警事件；维修工单；指标口径仓库；审计日志
@@ -55,7 +55,7 @@
   - 验证（冒烟测试）：`backend/scripts/seed_data_smoke_test.py`
   - _Requirements: docs/requirements.md#R7.2, docs/design.md#2.6.2_
 
-- [ ] 7. 指标口径仓库：版本化口径 + 指标计算必须绑定 `lineage_version`
+- [x] 7. 指标口径仓库：版本化口径 + 指标计算必须绑定 `lineage_version`
 
   - 定义指标实体（指标名、版本、公式、数据源、责任人）
   - 拒答策略：口径缺失/冲突时拒绝输出确定性结论
@@ -158,9 +158,19 @@
 
   - Web：三栏布局；对话区 message.delta 流式渲染
   - 证据面板：`evidence.update` 增量渲染；数值胶囊（Trust Pill）可展开证据
+  - 复用策略：**基于现有 `web/` 前端原型改造（不要求从零重写 UI）**
+    - 保留：三栏式信息架构、工业风格视觉、Context Panel/Trust Pill 的交互与布局
+    - 重构：移除所有硬编码 mock 响应/前端自演示数据流，改为对齐后端 SSE 事件契约驱动渲染
+    - 新增：前端对外 I/O 与 SSE 事件 **Zod schema** 校验（从 schema 推导类型），并在运行时对事件进行校验与错误上报
+    - 新增：SSE 客户端状态机（`EventSource`/重连/超时/取消/错误态），支持 `progress/message.delta/evidence.update/error/final`
+    - 技术债务清理（本任务范围）：清除原型中所有“仅用于演示”的硬编码分支，避免线上路径残留
   - 断线：SSE 自动重连与提示
   - 验证（单元测试）：`npm -C web test`
   - 验证（冒烟测试）：`npm -C web run build && backend/scripts/web_sse_e2e_smoke_test.py`
+    - 说明：若 `backend/scripts/web_sse_e2e_smoke_test.py` 不存在，则**本任务必须补齐脚本**；脚本至少验证：
+      - 真实后端 SSE 连接可建立（不可使用 mock server）
+      - 能收到并解析最小事件序列（含 `message.delta` 与 `final`；如有 `evidence.update` 更佳）
+      - 异常路径可解析结构化错误（含 `code/message(英文)/requestId/retryable`）
   - _Requirements: docs/requirements.md#R13.1, docs/requirements.md#R13.2, docs/requirements.md#R13.3, docs/design.md#2.2_
 
 ## L2（诊断/多模态/可观测增强：RAG、并发、配额、移动端）

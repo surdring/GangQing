@@ -29,6 +29,36 @@
 - Unit: `pytest -q`
 - Smoke: `backend/scripts/sse_smoke_test.py`
 
+# 联调检查清单（服务端视角）
+- [ ] 事件 envelope 是否与 `docs/contracts/api-and-events-draft.md` 一致（字段名、嵌套层级、可选字段）？
+- [ ] 每个事件是否都携带 `requestId`（以及若契约要求则携带 `sessionId`）？
+- [ ] 事件类型是否覆盖并只覆盖：
+  - [ ] `progress`
+  - [ ] `tool.call`
+  - [ ] `tool.result`
+  - [ ] `message.delta`
+  - [ ] `evidence.update`
+  - [ ] `warning`
+  - [ ] `error`
+  - [ ] `final`
+- [ ] 最小可用事件序列是否可稳定复现：`progress` -> `tool.call` -> `tool.result` -> `message.delta`(>=1) -> `final`？
+- [ ] `message.delta` 是否保证“增量”语义（前端可逐段追加渲染，而非重复全量）？
+- [ ] `evidence.update` 是否满足“增量更新”语义（可多次发送；前端可合并更新而非覆盖丢失）？
+- [ ] `error` payload 是否为结构化错误（ErrorResponse），且包含：
+  - [ ] `code`
+  - [ ] `message`（英文）
+  - [ ] `requestId`
+  - [ ] `retryable`
+  - [ ] `details?`（仅结构化上下文，禁止敏感信息）
+- [ ] 不可恢复错误路径是否严格输出：`error` -> `final`，且 `final` 后不再输出任何事件？
+- [ ] 客户端断开/取消时：
+  - [ ] 后端是否停止继续写入 SSE（避免 BrokenPipe 循环）？
+  - [ ] 是否停止后续工具调用/推理（至少可验证）？
+- [ ] `backend/scripts/sse_smoke_test.py` 是否验证了：
+  - [ ] 正常链路的最小事件序列
+  - [ ] 至少 1 条错误链路（校验结构化 `error` 字段 + 英文 message）
+  - [ ] `requestId` 贯穿
+
 # Output Requirement
 输出执行蓝图，禁止写代码。
 ```
@@ -59,7 +89,11 @@
 - **Smoke**: `backend/scripts/sse_smoke_test.py`。
 
 # Output Requirement
-输出修改文件完整内容 + 测试命令。
+交付方式：**摘要 + 关键片段 + 文件路径**（禁止在聊天中粘贴大文件全文）。
+- 摘要：说明本次修改了哪些文件、哪些章节/段落发生变更。
+- 关键片段：仅粘贴与本子任务契约/实现要求直接相关的最小必要片段。
+- 文件路径：给出修改后的文件路径，作为权威落盘产物（以仓库文件为准）。
+- 输出验证命令与关键输出摘要（文本）。
 ```
 
 ---
@@ -87,7 +121,11 @@
 - **Smoke**: `backend/scripts/sse_smoke_test.py`（覆盖一次错误路径）。
 
 # Output Requirement
-输出修改文件完整内容 + 测试命令。
+交付方式：**摘要 + 关键片段 + 文件路径**（禁止在聊天中粘贴大文件全文）。
+- 摘要：说明本次修改了哪些文件、哪些章节/段落发生变更。
+- 关键片段：仅粘贴与本子任务契约/实现要求直接相关的最小必要片段。
+- 文件路径：给出修改后的文件路径，作为权威落盘产物（以仓库文件为准）。
+- 输出验证命令与关键输出摘要（文本）。
 ```
 
 ---

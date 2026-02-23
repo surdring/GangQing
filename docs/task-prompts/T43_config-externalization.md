@@ -19,6 +19,7 @@
 # References
 - PRD: docs/requirements.md（R14.5）
 - TDD: docs/design.md（2.9）
+- AGENTS: AGENTS.md（配置化开发原则 / `.env.local` 约束）
 - tasks: docs/tasks.md（任务 43）
 - contracts: docs/contracts/api-and-events-draft.md
 - env: .env.example
@@ -62,7 +63,11 @@
 - **Smoke**: `backend/scripts/config_validation_smoke_test.py`
 
 # Output Requirement
-输出修改文件完整内容 + 测试命令与关键输出。
+交付方式：**摘要 + 关键片段 + 文件路径**（禁止在聊天中粘贴大文件全文）。
+- 摘要：说明本次修改了哪些文件、哪些章节/段落发生变更。
+- 关键片段：仅粘贴与本子任务契约/实现要求直接相关的最小必要片段。
+- 文件路径：给出修改后的文件路径，作为权威落盘产物（以仓库文件为准）。
+- 输出验证命令与关键输出摘要（文本）。
 ```
 
 ---
@@ -75,3 +80,4 @@
 - [x] RBAC/审计/requestId？（如配置涉及审计开关也需）
 - [x] Schema（Zod/Pydantic）？（本任务核心）
 - [x] 真实集成测试 No Skip？
+- [x] Doc References Updated
