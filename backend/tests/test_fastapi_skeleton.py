@@ -27,6 +27,7 @@ def test_sse_error_payload_contains_request_id() -> None:
             retryable=False,
         ),
     )
+    assert sorted(payload.keys()) == ["code", "details", "message", "requestId", "retryable"]
     assert payload["requestId"] == "rid_sse_err"
 
 

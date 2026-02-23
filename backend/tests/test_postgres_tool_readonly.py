@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -164,14 +165,58 @@ def test_time_range_start_equals_end_is_validation_error() -> None:
     ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="plant_manager")
     tool = PostgresReadOnlyQueryTool(execute_fn=lambda **_: [])
 
-    with pytest.raises(Exception):
-        PostgresReadOnlyQueryParams(
-            templateId="production_daily",
-            timeRange={
-                "start": datetime(2026, 2, 1, tzinfo=timezone.utc),
-                "end": datetime(2026, 2, 1, tzinfo=timezone.utc),
+    with pytest.raises(AppError) as e:
+        tool.run_raw(
+            ctx=ctx,
+            raw_params={
+                "templateId": "production_daily",
+                "timeRange": {
+                    "start": datetime(2026, 2, 1, tzinfo=timezone.utc),
+                    "end": datetime(2026, 2, 1, tzinfo=timezone.utc),
+                },
             },
         )
+    assert e.value.code == ErrorCode.VALIDATION_ERROR
+    assert e.value.request_id == "r1"
+    assert isinstance(e.value.message, str)
+    assert e.value.message == "Invalid tool parameters"
+    assert e.value.retryable is False
+    assert isinstance(e.value.details, dict)
+    assert "fieldErrors" in (e.value.details or {})
+
+
+def test_run_raw_validation_failure_writes_audit_event() -> None:
+    captured: list[dict] = []
+
+    def _capture_audit(*, ctx, tool_name, args_summary, result_status, error_code=None, evidence_refs=None):
+        captured.append(
+            {
+                "tool_name": tool_name,
+                "args_summary": args_summary,
+                "result_status": result_status,
+                "error_code": error_code,
+                "evidence_refs": evidence_refs,
+            }
+        )
+
+    ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="plant_manager")
+    tool = PostgresReadOnlyQueryTool(execute_fn=lambda **_: [], audit_fn=_capture_audit)
+
+    with pytest.raises(AppError) as e:
+        tool.run_raw(ctx=ctx, raw_params={"templateId": "production_daily"})
+
+    assert e.value.code == ErrorCode.VALIDATION_ERROR
+
+    assert captured
+    last = captured[-1]
+    assert last["tool_name"] == tool.name
+    assert last["result_status"] == "failure"
+    assert last["error_code"] == ErrorCode.VALIDATION_ERROR.value
+    assert isinstance(last["args_summary"], dict)
+    assert last["args_summary"].get("stage") == "tool.params.validate"
+    assert e.value.message == "Invalid tool parameters"
+    assert isinstance(e.value.details, dict)
+    assert "fieldErrors" in (e.value.details or {})
 
 
 def test_invalid_template_id_is_validation_error() -> None:
@@ -179,8 +224,11 @@ def test_invalid_template_id_is_validation_error() -> None:
     tool = PostgresReadOnlyQueryTool(execute_fn=lambda **_: [])
 
     params = PostgresReadOnlyQueryParams(templateId="unknown_template", timeRange=_make_timerange())
-    with pytest.raises(Exception):
+    with pytest.raises(AppError) as e:
         tool.run(ctx=ctx, params=params)
+    assert e.value.code == ErrorCode.VALIDATION_ERROR
+    assert e.value.request_id == "r1"
+    assert isinstance(e.value.message, str)
 
 
 def test_forbidden_when_role_missing() -> None:
@@ -205,6 +253,49 @@ def test_timeout_is_mapped_to_upstream_timeout() -> None:
         tool.run(ctx=ctx, params=params)
     assert e.value.code == ErrorCode.UPSTREAM_TIMEOUT
     assert e.value.retryable is True
+
+
+def test_output_contract_violation_is_mapped_to_contract_violation() -> None:
+    original = os.environ.get("GANGQING_FORCE_POSTGRES_TOOL_OUTPUT_CONTRACT_VIOLATION")
+    os.environ["GANGQING_FORCE_POSTGRES_TOOL_OUTPUT_CONTRACT_VIOLATION"] = "1"
+    try:
+        def _return_rows(**_):
+            return [
+                {
+                    "tenant_id": "t1",
+                    "project_id": "p1",
+                    "business_date": datetime(2026, 2, 1, tzinfo=timezone.utc).date(),
+                    "equipment_id": None,
+                    "quantity": 1,
+                    "unit": "kg",
+                    "source_system": "test",
+                    "source_record_id": "r1",
+                    "time_start": datetime(2026, 2, 1, tzinfo=timezone.utc),
+                    "time_end": datetime(2026, 2, 2, tzinfo=timezone.utc),
+                    "extracted_at": datetime(2026, 2, 2, tzinfo=timezone.utc),
+                }
+            ]
+
+        ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="plant_manager")
+        tool = PostgresReadOnlyQueryTool(execute_fn=_return_rows)
+        params = PostgresReadOnlyQueryParams(templateId="production_daily", timeRange=_make_timerange())
+
+        with pytest.raises(AppError) as e:
+            tool.run(ctx=ctx, params=params)
+
+        assert e.value.code == ErrorCode.CONTRACT_VIOLATION
+        assert e.value.request_id == "r1"
+        assert isinstance(e.value.message, str)
+        assert e.value.message == "Output contract violation"
+        assert e.value.retryable is False
+        assert isinstance(e.value.details, dict)
+        assert e.value.details.get("source") == "tool.postgres_readonly.result"
+        assert "fieldErrors" in (e.value.details or {})
+    finally:
+        if original is None:
+            os.environ.pop("GANGQING_FORCE_POSTGRES_TOOL_OUTPUT_CONTRACT_VIOLATION", None)
+        else:
+            os.environ["GANGQING_FORCE_POSTGRES_TOOL_OUTPUT_CONTRACT_VIOLATION"] = original
 
 
 def test_explicit_scope_mismatch_is_auth_error() -> None:

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from gangqing.common.auth import require_authed_request_context
 from gangqing.common.context import RequestContext
-from gangqing.common.errors import AppError, ErrorCode
+from gangqing.common.errors import AppError, ErrorCode, ErrorResponse
 from gangqing.common.rbac import require_capability
 from gangqing.schemas.sse import SseEnvelope, build_meta_envelope
 
@@ -29,20 +29,18 @@ def _encode_sse_event(envelope: SseEnvelope) -> str:
 
 def _build_error_payload(*, ctx: RequestContext, error: AppError | None) -> dict:
     if error is not None:
-        return {
-            "code": error.code.value,
-            "message": error.message,
-            "details": error.details,
-            "retryable": error.retryable,
-            "requestId": ctx.request_id,
-        }
-    return {
-        "code": ErrorCode.INTERNAL_ERROR.value,
-        "message": "Internal error",
-        "details": None,
-        "retryable": False,
-        "requestId": ctx.request_id,
-    }
+        payload = error.to_response().model_dump(by_alias=True)
+    else:
+        payload = ErrorResponse(
+            code=ErrorCode.INTERNAL_ERROR.value,
+            message="Internal error",
+            details=None,
+            retryable=False,
+            request_id=ctx.request_id,
+        ).model_dump(by_alias=True)
+
+    validated = ErrorResponse.model_validate(payload)
+    return validated.model_dump(by_alias=True)
 
 
 @router.post("/chat/stream")

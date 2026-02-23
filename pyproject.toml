@@ -23,6 +23,11 @@ addopts = "-ra"
 [tool.ruff]
 line-length = 100
 
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["gangqing*", "gangqing_db*"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

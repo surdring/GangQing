@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from gangqing.common.audit import write_tool_call_event
-from gangqing.common.errors import AppError, ErrorCode
 from gangqing.common.context import RequestContext
+from gangqing.common.errors import AppError, ErrorCode, build_contract_violation_error
 from gangqing.common.settings import load_settings
+from gangqing.tools.base import BaseReadOnlyToolMixin
 from gangqing.tools.isolation import build_scope_where_sql, require_rows_in_scope, resolve_scope
 from gangqing.tools.rbac import require_tool_capability
 from gangqing_db.evidence import Evidence, EvidenceTimeRange
@@ -63,6 +65,16 @@ class PostgresReadOnlyQueryParams(BaseModel):
             if c.field in {"tenant_id", "project_id", "tenantId", "projectId"}:
                 raise ValueError("filters must not include scope fields")
         return v
+
+
+def _force_output_contract_violation_enabled() -> bool:
+    return (os.getenv("GANGQING_FORCE_POSTGRES_TOOL_OUTPUT_CONTRACT_VIOLATION") or "").strip() in {
+        "1",
+        "true",
+        "TRUE",
+        "yes",
+        "YES",
+    }
 
 
 class ColumnDef(BaseModel):
@@ -214,8 +226,9 @@ def _build_filters_where_sql_and_params(
 _REQUIRED_CAPABILITY = "tool:postgres:read"
 
 
-class PostgresReadOnlyQueryTool:
+class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
     name = "postgres_readonly_query"
+    ParamsModel = PostgresReadOnlyQueryParams
 
     def __init__(
         self,
@@ -271,7 +284,7 @@ class PostgresReadOnlyQueryTool:
                 ErrorCode.VALIDATION_ERROR,
                 "Unknown templateId",
                 request_id=ctx.request_id,
-                details={"templateId": params.template_id, "cause": str(e)},
+                details={"reason": "unknown_template"},
                 retryable=False,
             )
             self._audit_fn(
@@ -513,7 +526,7 @@ class PostgresReadOnlyQueryTool:
             evidence_refs=[evidence_id],
         )
 
-        return PostgresReadOnlyQueryResult(
+        result = PostgresReadOnlyQueryResult(
             tool_call_id=tool_call_id,
             rows=exposed_rows,
             row_count=len(exposed_rows),
@@ -522,3 +535,31 @@ class PostgresReadOnlyQueryTool:
             query_fingerprint=query_fingerprint,
             evidence=evidence,
         )
+
+        output_payload = result.model_dump(by_alias=True, mode="json")
+        if _force_output_contract_violation_enabled():
+            output_payload["rowCount"] = "__invalid__"
+
+        try:
+            validated = PostgresReadOnlyQueryResult.model_validate(output_payload)
+        except ValidationError as e:
+            err = build_contract_violation_error(
+                request_id=ctx.request_id,
+                error=e,
+                source="tool.postgres_readonly.result",
+            )
+            self._audit_fn(
+                ctx=ctx,
+                tool_name=self.name,
+                args_summary={
+                    "stage": "tool.output.validate",
+                    "source": "output_validation",
+                    "queryFingerprint": query_fingerprint,
+                    "durationMs": _duration_ms(),
+                },
+                result_status="failure",
+                error_code=err.code.value,
+            )
+            raise err
+
+        return validated
