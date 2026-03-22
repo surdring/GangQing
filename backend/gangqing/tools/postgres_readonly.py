@@ -9,15 +9,32 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from gangqing.common.audit import write_tool_call_event
 from gangqing.common.context import RequestContext
-from gangqing.common.errors import AppError, ErrorCode, build_contract_violation_error
+from gangqing.common.errors import AppError, ErrorCode
+from gangqing.common.masking import apply_evidence_role_based_masking, load_masking_policy
+from gangqing.common.rbac import has_capability
 from gangqing.common.settings import load_settings
 from gangqing.tools.base import BaseReadOnlyToolMixin
-from gangqing.tools.isolation import build_scope_where_sql, require_rows_in_scope, resolve_scope
+from gangqing.tools.metadata import (
+    ToolAccessMode,
+    ToolContractRefs,
+    ToolExecutionPolicy,
+    ToolGovernance,
+    ToolMetadata,
+    ToolRbacPolicy,
+    ToolRedactionPolicyRef,
+)
+from gangqing.tools.isolation import (
+    build_scope_filter_summary,
+    build_scope_where_sql,
+    require_rows_in_scope,
+    resolve_scope,
+)
 from gangqing.tools.rbac import require_tool_capability
+from gangqing.tools.registry import tool_metadata
 from gangqing_db.evidence import Evidence, EvidenceTimeRange
 from gangqing_db.errors import MigrationError
 from gangqing_db.postgres_query import execute_readonly_query, safe_extract_database_name
@@ -44,6 +61,8 @@ class OrderBy(BaseModel):
 class PostgresReadOnlyQueryParams(BaseModel):
     tenant_id: str | None = Field(default=None, alias="tenantId")
     project_id: str | None = Field(default=None, alias="projectId")
+
+    tool_call_id: str | None = Field(default=None, alias="toolCallId")
 
     template_id: str = Field(min_length=1, alias="templateId")
 
@@ -75,6 +94,15 @@ def _force_output_contract_violation_enabled() -> bool:
         "yes",
         "YES",
     }
+
+
+def _force_evidence_validation() -> str | None:
+    value = (os.getenv("GANGQING_FORCE_POSTGRES_EVIDENCE_VALIDATION") or "").strip()
+    if not value:
+        return None
+    value_norm = value.lower()
+    allowed = {"verifiable", "not_verifiable", "out_of_bounds", "mismatch"}
+    return value_norm if value_norm in allowed else None
 
 
 class ColumnDef(BaseModel):
@@ -226,9 +254,36 @@ def _build_filters_where_sql_and_params(
 _REQUIRED_CAPABILITY = "tool:postgres:read"
 
 
+def _build_postgres_readonly_tool_metadata() -> ToolMetadata:
+    settings = load_settings()
+    return ToolMetadata(
+        toolName="postgres_readonly_query",
+        version="1",
+        enabled=True,
+        governance=ToolGovernance(accessMode=ToolAccessMode.READ_ONLY, requiresApproval=False),
+        rbac=ToolRbacPolicy(requiredCapability=_REQUIRED_CAPABILITY),
+        execution=ToolExecutionPolicy(
+            timeoutSeconds=float(settings.postgres_tool_default_timeout_seconds),
+            maxRetries=int(settings.tool_max_retries),
+        ),
+        redaction=ToolRedactionPolicyRef(policyId="default"),
+        contracts=ToolContractRefs(
+            paramsModel="gangqing.tools.postgres_readonly.PostgresReadOnlyQueryParams",
+            resultModel="gangqing.tools.postgres_readonly.PostgresReadOnlyQueryResult",
+            outputContractSource="tool.postgres_readonly.result",
+        ),
+        dataDomains=["postgres"],
+        tags=["readonly"],
+    )
+
+
+@tool_metadata(_build_postgres_readonly_tool_metadata())
 class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
     name = "postgres_readonly_query"
     ParamsModel = PostgresReadOnlyQueryParams
+    ResultModel = PostgresReadOnlyQueryResult
+    required_capability = _REQUIRED_CAPABILITY
+    output_contract_source = "tool.postgres_readonly.result"
 
     def __init__(
         self,
@@ -239,23 +294,24 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
         self._execute_fn = execute_fn
         self._audit_fn = audit_fn
 
-    def run(self, *, ctx: RequestContext, params: PostgresReadOnlyQueryParams) -> PostgresReadOnlyQueryResult:
+    def run(self, *, ctx: RequestContext, params: PostgresReadOnlyQueryParams) -> Any:
         start_time = time.perf_counter()
 
         def _duration_ms() -> int:
             return int((time.perf_counter() - start_time) * 1000)
 
-        try:
-            require_tool_capability(ctx=ctx, capability=_REQUIRED_CAPABILITY)
-        except AppError as e:
-            self._audit_fn(
-                ctx=ctx,
-                tool_name=self.name,
-                args_summary={"reason": "rbac_denied", "durationMs": _duration_ms()},
-                result_status="failure",
-                error_code=e.code.value,
-            )
-            raise
+        def _build_error_details(*, timeout_ms: int | None = None) -> dict[str, Any]:
+            details: dict[str, Any] = {
+                "toolName": self.name,
+                "durationMs": _duration_ms(),
+            }
+            if timeout_ms is not None:
+                details["timeoutMs"] = int(timeout_ms)
+            return details
+
+        capability = getattr(self, "required_capability", None)
+        if capability:
+            require_tool_capability(ctx=ctx, capability=capability, tool_name=self.name)
 
         settings = load_settings()
 
@@ -269,13 +325,21 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
             self._audit_fn(
                 ctx=ctx,
                 tool_name=self.name,
-                args_summary={"reason": "scope_rejected", "durationMs": _duration_ms()},
+                args_summary={
+                    "reason": "scope_rejected",
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=getattr(ctx, "tenant_id", None),
+                        project_id=getattr(ctx, "project_id", None),
+                        mode="rejected",
+                    ),
+                    "durationMs": _duration_ms(),
+                },
                 result_status="failure",
                 error_code=e.code.value,
             )
             raise
 
-        tool_call_id = uuid.uuid4().hex
+        tool_call_id = (params.tool_call_id or "").strip() or uuid.uuid4().hex
 
         try:
             template = get_postgres_template(params.template_id)
@@ -292,6 +356,11 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
                 tool_name=self.name,
                 args_summary={
                     "reason": "template_rejected",
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        mode=scope_mode,
+                    ),
                     "templateId": params.template_id,
                     "durationMs": _duration_ms(),
                 },
@@ -314,7 +383,15 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
             self._audit_fn(
                 ctx=ctx,
                 tool_name=self.name,
-                args_summary={"reason": "filters_rejected", "durationMs": _duration_ms()},
+                args_summary={
+                    "reason": "filters_rejected",
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        mode=scope_mode,
+                    ),
+                    "durationMs": _duration_ms(),
+                },
                 result_status="failure",
                 error_code=e.code.value,
             )
@@ -334,7 +411,15 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
             self._audit_fn(
                 ctx=ctx,
                 tool_name=self.name,
-                args_summary={"reason": "order_by_rejected", "durationMs": _duration_ms()},
+                args_summary={
+                    "reason": "order_by_rejected",
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        mode=scope_mode,
+                    ),
+                    "durationMs": _duration_ms(),
+                },
                 result_status="failure",
                 error_code=e.code.value,
             )
@@ -400,6 +485,11 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
                 tool_name=self.name,
                 args_summary={
                     "reason": "select_only_rejected",
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        mode=scope_mode,
+                    ),
                     "templateId": template.template_id,
                     "queryFingerprint": query_fingerprint,
                     "durationMs": _duration_ms(),
@@ -456,7 +546,7 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
                 common_code,
                 e.message,
                 request_id=ctx.request_id,
-                details=e.details,
+                details=_build_error_details(timeout_ms=timeout_ms),
                 retryable=bool(e.retryable),
             ) from e
 
@@ -468,6 +558,11 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
                 tool_name=self.name,
                 args_summary={
                     "reason": "cross_scope_data_hit",
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        mode=scope_mode,
+                    ),
                     "templateId": template.template_id,
                     "queryFingerprint": query_fingerprint,
                     "durationMs": _duration_ms(),
@@ -481,7 +576,11 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
         for r in rows:
             exposed_rows.append({k: r.get(k) for k in template.exposed_fields})
 
-        evidence_id = uuid.uuid4().hex
+        base_evidence_id = f"pg:{template.template_id}:{query_fingerprint}"
+        if len(base_evidence_id) > 128:
+            digest = hashlib.sha256(base_evidence_id.encode("utf-8")).hexdigest()
+            base_evidence_id = f"pg:{digest}"
+        evidence_id = base_evidence_id
         extracted_at = datetime.now(timezone.utc)
 
         db_settings = load_db_settings()
@@ -508,23 +607,80 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
             redactions=None,
         )
 
-        self._audit_fn(
-            ctx=ctx,
-            tool_name=self.name,
-            args_summary={
-                "templateId": template.template_id,
-                "timeRange": fingerprint_payload["timeRange"],
-                "filters": filters_summary,
-                "limit": params.limit,
-                "offset": params.offset,
-                "queryFingerprint": query_fingerprint,
-                "rowCount": len(exposed_rows),
-                "durationMs": _duration_ms(),
-            },
-            result_status="success",
-            error_code=None,
-            evidence_refs=[evidence_id],
+        try:
+            masking_policy = load_masking_policy()
+        except Exception:
+            masking_policy = None
+        role_raw = (getattr(ctx, "role", None) or "").strip() or None
+        can_unmask = has_capability(role_raw=(role_raw or ""), capability="data:unmask:read")
+        evidence = apply_evidence_role_based_masking(
+            evidence,
+            role=role_raw,
+            can_unmask=can_unmask,
+            policy=masking_policy,
         )
+
+        forced_validation = _force_evidence_validation()
+        if forced_validation is not None:
+            evidence.validation = forced_validation
+
+        result_summary = {
+            "toolName": self.name,
+            "rowCount": len(exposed_rows),
+            "truncated": len(exposed_rows) >= params.limit,
+            "queryFingerprint": query_fingerprint,
+        }
+
+        try:
+            self._audit_fn(
+                ctx=ctx,
+                tool_name=self.name,
+                tool_call_id=tool_call_id,
+                duration_ms=_duration_ms(),
+                args_summary={
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        mode=scope_mode,
+                    ),
+                    "templateId": template.template_id,
+                    "timeRange": fingerprint_payload["timeRange"],
+                    "filters": filters_summary,
+                    "limit": params.limit,
+                    "offset": params.offset,
+                    "queryFingerprint": query_fingerprint,
+                    "rowCount": len(exposed_rows),
+                    "durationMs": _duration_ms(),
+                    "resultSummary": result_summary,
+                },
+                result_status="success",
+                error_code=None,
+                evidence_refs=[evidence_id],
+            )
+        except TypeError:
+            self._audit_fn(
+                ctx=ctx,
+                tool_name=self.name,
+                args_summary={
+                    "scopeFilter": build_scope_filter_summary(
+                        tenant_id=tenant_id,
+                        project_id=project_id,
+                        mode=scope_mode,
+                    ),
+                    "templateId": template.template_id,
+                    "timeRange": fingerprint_payload["timeRange"],
+                    "filters": filters_summary,
+                    "limit": params.limit,
+                    "offset": params.offset,
+                    "queryFingerprint": query_fingerprint,
+                    "rowCount": len(exposed_rows),
+                    "durationMs": _duration_ms(),
+                    "resultSummary": result_summary,
+                },
+                result_status="success",
+                error_code=None,
+                evidence_refs=[evidence_id],
+            )
 
         result = PostgresReadOnlyQueryResult(
             tool_call_id=tool_call_id,
@@ -536,30 +692,9 @@ class PostgresReadOnlyQueryTool(BaseReadOnlyToolMixin):
             evidence=evidence,
         )
 
-        output_payload = result.model_dump(by_alias=True, mode="json")
         if _force_output_contract_violation_enabled():
+            output_payload = result.model_dump(by_alias=True)
             output_payload["rowCount"] = "__invalid__"
+            return output_payload
 
-        try:
-            validated = PostgresReadOnlyQueryResult.model_validate(output_payload)
-        except ValidationError as e:
-            err = build_contract_violation_error(
-                request_id=ctx.request_id,
-                error=e,
-                source="tool.postgres_readonly.result",
-            )
-            self._audit_fn(
-                ctx=ctx,
-                tool_name=self.name,
-                args_summary={
-                    "stage": "tool.output.validate",
-                    "source": "output_validation",
-                    "queryFingerprint": query_fingerprint,
-                    "durationMs": _duration_ms(),
-                },
-                result_status="failure",
-                error_code=err.code.value,
-            )
-            raise err
-
-        return validated
+        return result

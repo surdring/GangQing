@@ -28,14 +28,19 @@
 
 # References
 - PRD: docs/requirements.md（R12.3）
-- TDD: docs/design.md（2.9）
+- TDD: docs/design.md（2.9, 6.1, 7.x）
 - tasks: docs/tasks.md（任务 18）
 - contracts: docs/contracts/api-and-events-draft.md
 - api docs: docs/api/openapi.yaml
 
 # 权威参考文档/约束来源（强制）
-- docs/contracts/api-and-events-draft.md（以其中 `GET /api/v1/health` 小节为准）
-- docs/api/openapi.yaml（以 `HealthResponse` / `ErrorResponse` schema 为准）
+- docs/contracts/api-and-events-draft.md（以其中 `GET /api/v1/health` 小节为准；含状态码策略/敏感信息边界/验收要点）
+- docs/api/openapi.yaml（以 `/api/v1/health` 的 responses 与 `HealthResponse`/`ErrorResponse` schema 为准）
+- backend/gangqing/api/health.py（以实际路由与状态码策略为准）
+- backend/gangqing/common/healthcheck.py（以依赖探测与状态聚合逻辑为准）
+- backend/gangqing/common/context.py（以 scope headers 要求与 requestId 生成/透传规则为准）
+- backend/scripts/start_server_and_healthcheck.py（以冒烟脚本断言为准）
+- backend/tests/test_fastapi_skeleton.py（以单元测试覆盖面与断言为准）
 
 # Execution Plan
 1) Task 18.1（健康检查端点与响应模型）
@@ -45,6 +50,7 @@
 - Key Decisions:
   - 响应模型字段与敏感信息边界（哪些信息可返回，哪些只能写日志）。
   - `requestId` 获取策略：从 `X-Request-Id` 透传或服务端生成。
+  - 状态码策略与契约一致性：整体 `unhealthy` 必须返回 `503`，否则返回 `200`。
 - Deliverables:
   - Pydantic 响应/错误模型定义。
   - `GET /api/v1/health` 在 OpenAPI 中可追溯（如本仓库以 `docs/api/openapi.yaml` 为准，则需对齐）。
@@ -66,7 +72,7 @@
   - 以“真实启动 FastAPI 并调用 `/api/v1/health`”为主线，形成可自动化的发布门禁。
   - 冒烟覆盖：成功路径 + 至少一个失败路径（例如缺少 header 或缺少关键配置）。
 - Deliverables:
-  - `backend/scripts/start_server_and_healthcheck.py`（如已存在则校验其与最新契约一致）。
+  - `backend/scripts/start_server_and_healthcheck.py`（对齐最新契约与日志断言；若已存在则只允许做“对齐/补齐”，禁止扩展范围）。
   - 冒烟脚本输出与日志校验口径（例如必须能在结构化日志中找到 requestId）。
 
 # Deliverables Definition (交付物定义)
@@ -109,25 +115,59 @@
 # References
 - tasks: docs/tasks.md（18.1）
 - TDD: docs/design.md（2.9）
+- contracts: docs/contracts/api-and-events-draft.md（2.2.1 `GET /api/v1/health`）
+- api docs: docs/api/openapi.yaml（/api/v1/health）
 
 # Target Files
-- backend/gangqing/api/*（健康检查路由所在模块，以仓库实际为准）
-- backend/gangqing/app/*（应用装配、依赖注入、日志/requestId 中间件，以仓库实际为准）
-- backend/tests/test_fastapi_skeleton.py（已有健康检查相关测试，需对齐契约，若本任务修改了契约）
-- docs/api/openapi.yaml（若仓库以该文件为 OpenAPI 权威来源，则需对齐）
+- backend/gangqing/api/health.py
+- backend/gangqing/api/router.py（确认已挂载 `/api/v1/health`）
+- backend/gangqing/common/context.py（`X-Tenant-Id`/`X-Project-Id`/`X-Request-Id` 处理规则）
+- backend/gangqing/common/healthcheck.py（Pydantic `HealthResponse`/依赖结构）
+- backend/tests/test_fastapi_skeleton.py（健康检查相关测试与敏感信息泄露断言）
+- docs/contracts/api-and-events-draft.md（若任务涉及契约补充/修正）
+- docs/api/openapi.yaml（若任务涉及 OpenAPI 对齐）
+- .env.example（若新增/补齐配置项）
 
 # Execution Plan
-1) 定义 Pydantic HealthResponse 模型。
-2) 探测 Postgres 与 llama.cpp。
-3) 缺配置直接失败并给出英文错误。
+1) 对齐契约与现状
+- 以 `docs/contracts/api-and-events-draft.md` 的 `/api/v1/health` 小节为“对外契约底线”。
+- 以 `docs/api/openapi.yaml` 的 `/api/v1/health` 路径为“接口声明权威来源”。
+- 若发现 code/openapi/contract 三者不一致：以“对外契约文档 + 测试断言”为优先，制定对齐策略并在本子任务交付摘要中说明。
+
+2) 定义/校验 HealthResponse 与依赖结构
+- 响应体必须满足：`status`/`requestId`/`version`/`dependencies[]`。
+- 依赖项必须至少包含：`config/postgres/llama_cpp/provider/model`。
+
+3) 状态码与头部
+- `X-Request-Id`：无论成功/失败都必须在响应头返回，且与 body.requestId 一致。
+- overall `unhealthy` 必须返回 `503`；overall `healthy/degraded` 返回 `200`。
+
+4) 敏感信息边界
+- 响应体不得包含：DB URL、任何密钥/token、内部堆栈、上游响应正文。
+- 若需要排障信息：只允许进入结构化日志，且必须脱敏。
 
 # Contract Notes (契约要点)
 - 请求头：至少需要 `X-Tenant-Id`、`X-Project-Id`；`X-Request-Id` 可选（若缺失由服务端生成）。
 - 响应体：必须包含 `requestId`，并返回总体状态与依赖状态列表。
 - 状态码策略：
   - `200`：总体 `healthy` 或 `degraded`
-  - `503`：总体 `unhealthy`（或按仓库既有约定）
+  - `503`：总体 `unhealthy`
   - `4xx`：缺少必需 headers / 鉴权失败（返回结构化错误）
+
+# Environment Variables (契约/实现必须对齐)
+- 必需：
+  - `GANGQING_DATABASE_URL`
+  - `GANGQING_LLAMACPP_BASE_URL` 或 `GANGQING_PROVIDER_HEALTHCHECK_URL`（至少一个）
+- 可选（但一旦存在必须可被解析且影响行为可被测试）：
+  - `GANGQING_HEALTHCHECK_CACHE_TTL_SECONDS`
+  - `GANGQING_HEALTHCHECK_POSTGRES_CONNECT_TIMEOUT_SECONDS`
+  - `GANGQING_LLAMACPP_HEALTH_PATH`
+  - `GANGQING_LLAMACPP_TIMEOUT_SECONDS`
+  - `GANGQING_LLAMACPP_TRUST_ENV`
+  - `GANGQING_LLAMACPP_CRITICAL`
+  - `GANGQING_PROVIDER_TIMEOUT_SECONDS`
+  - `GANGQING_PROVIDER_TRUST_ENV`
+  - `GANGQING_SERVICE_NAME` / `GANGQING_BUILD` / `GANGQING_COMMIT`（若服务端支持将其注入 version 字段）
 
 # Verification
 - **Unit**: `pytest -q`
@@ -172,10 +212,12 @@
 - tasks: docs/tasks.md（18.2）
 
 # Target Files
-- backend/gangqing/app/*（配置加载与校验，依赖装配）
-- backend/gangqing/api/*（健康检查聚合逻辑）
-- backend/gangqing/tools/*（如 llama.cpp / Postgres 客户端适配所在目录，以仓库实际为准）
-- backend/tests/*（新增/更新单元测试）
+- backend/gangqing/common/healthcheck.py（依赖探测与聚合逻辑：`probe_*`/`aggregate_overall_status`/`run_dependency_probes`）
+- backend/gangqing/common/context.py（缺 scope headers 的错误码与 message 必须为英文）
+- backend/gangqing/api/health.py（`503` 策略与 cache 策略）
+- backend/tests/test_fastapi_skeleton.py（依赖探测相关覆盖与敏感信息泄露断言）
+- backend/scripts/start_server_and_healthcheck.py（冒烟脚本对依赖项名称的硬断言，修改需同步更新脚本与契约文档）
+- .env.example（若新增/补齐配置项）
 
 # Execution Plan
 1) 明确“关键配置集合”与缺失时的失败策略
@@ -188,7 +230,15 @@
 3) 定义状态映射矩阵
 - 关键依赖失败是否直接 `unhealthy`，非关键依赖失败是否 `degraded`。
 
-4) 单元测试
+4) 性能与稳定性边界
+- 探测必须轻量：
+  - Postgres 只允许 `SELECT 1`。
+  - HTTP 探测必须有严格 timeout，避免卡住健康检查。
+- 可选 cache（`GANGQING_HEALTHCHECK_CACHE_TTL_SECONDS`）：
+  - 只允许缓存 `healthy/degraded`。
+  - 禁止缓存 `unhealthy`。
+
+5) 单元测试
 - 覆盖：缺配置（失败）、headers 缺失（失败）、依赖不可达（失败/降级）、成功路径。
 
 # Verification
@@ -226,7 +276,7 @@
 
 # Target Files
 - backend/scripts/start_server_and_healthcheck.py
-- backend/tests/*（如需补充：对脚本或端点契约做单元/集成断言）
+- backend/tests/test_fastapi_skeleton.py（如需补充：对端点契约、敏感信息边界、依赖项列表做回归断言）
 
 # Execution Plan
 1) 校验脚本请求头与端点契约一致
@@ -238,6 +288,10 @@
 
 3) 校验日志 requestId
 - 必须能在结构化日志中找到本次请求的 `requestId`（脚本中 requestId 与日志字段一致）。
+
+4) 输出稳定性
+- 成功时必须输出固定标志：`healthcheck_ok`。
+- 失败时必须输出可诊断信息（包含 status code 与 response body 的安全摘要）。
 
 # Verification
 - **Smoke**: `python backend/scripts/start_server_and_healthcheck.py`
@@ -263,3 +317,8 @@
 - [x] 是否包含 `requestId` 贯穿与日志可观测性要求？
 - [x] 是否强调真实集成测试且不可 skip，并给出可执行的验证命令？
 - [x] Doc References Updated
+- [x] 是否明确了状态码与头部的契约要求？
+- [x] 是否明确了环境变量的契约/实现要求对齐？
+- [x] 是否明确了输出要求与验收口径？
+- [x] 是否明确了依赖探测的契约与实现要求？
+- [x] 是否明确了冒烟脚本的契约与实现要求？

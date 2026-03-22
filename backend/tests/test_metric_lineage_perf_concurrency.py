@@ -38,7 +38,7 @@ def _ctx(*, tenant_id: str, project_id: str) -> RequestContext:
         request_id=f"test-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
         tenant_id=tenant_id,
         project_id=project_id,
-        capabilities={"metric_lineage:read"},
+        capabilities={"metric:lineage:read"},
     )
 
 

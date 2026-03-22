@@ -13,6 +13,7 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
 
 
 logger = structlog.get_logger(__name__)
@@ -169,11 +170,18 @@ def probe_postgres(settings: HealthcheckSettings) -> HealthDependency:
         connect_timeout_int = max(1, int(round(connect_timeout_s)))
         engine = create_engine(
             settings.database_url,
-            pool_pre_ping=True,
+            pool_pre_ping=False,
+            poolclass=NullPool,
             connect_args={"connect_timeout": connect_timeout_int},
         )
-        with engine.connect() as conn:
-            conn.exec_driver_sql("SELECT 1")
+        try:
+            with engine.connect() as conn:
+                conn.exec_driver_sql("SELECT 1")
+        finally:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
         return HealthDependency(
             name=HealthDependencyName.postgres,
             status=HealthDependencyStatus.ok,
@@ -197,11 +205,13 @@ def probe_llama_cpp(settings: HealthcheckSettings) -> HealthDependency:
     started = time.perf_counter()
     checked_at = _now_iso()
 
+    is_critical = bool(settings.llamacpp_critical)
+
     if not settings.llamacpp_base_url.strip():
         return HealthDependency(
             name=HealthDependencyName.llama_cpp,
             status=HealthDependencyStatus.unavailable,
-            critical=bool(settings.llamacpp_critical),
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="not_configured"),
@@ -253,7 +263,7 @@ def probe_llama_cpp(settings: HealthcheckSettings) -> HealthDependency:
                         return HealthDependency(
                             name=HealthDependencyName.llama_cpp,
                             status=HealthDependencyStatus.ok,
-                            critical=bool(settings.llamacpp_critical),
+                            critical=is_critical,
                             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
                             checked_at=checked_at,
                             details=None,
@@ -269,8 +279,10 @@ def probe_llama_cpp(settings: HealthcheckSettings) -> HealthDependency:
         if last_status_code is not None:
             return HealthDependency(
                 name=HealthDependencyName.llama_cpp,
-                status=HealthDependencyStatus.unavailable,
-                critical=bool(settings.llamacpp_critical),
+                status=HealthDependencyStatus.unavailable
+                if is_critical
+                else HealthDependencyStatus.degraded,
+                critical=is_critical,
                 latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
                 checked_at=checked_at,
                 details=HealthDependencyDetails(reason="unexpected_response"),
@@ -278,16 +290,20 @@ def probe_llama_cpp(settings: HealthcheckSettings) -> HealthDependency:
         if had_timeout:
             return HealthDependency(
                 name=HealthDependencyName.llama_cpp,
-                status=HealthDependencyStatus.unavailable,
-                critical=bool(settings.llamacpp_critical),
+                status=HealthDependencyStatus.unavailable
+                if is_critical
+                else HealthDependencyStatus.degraded,
+                critical=is_critical,
                 latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
                 checked_at=checked_at,
                 details=HealthDependencyDetails(reason="timeout", error_class=last_error_class),
             )
         return HealthDependency(
             name=HealthDependencyName.llama_cpp,
-            status=HealthDependencyStatus.unavailable,
-            critical=bool(settings.llamacpp_critical),
+            status=HealthDependencyStatus.unavailable
+            if is_critical
+            else HealthDependencyStatus.degraded,
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="connection_failed", error_class=last_error_class),
@@ -295,8 +311,10 @@ def probe_llama_cpp(settings: HealthcheckSettings) -> HealthDependency:
     except httpx.TimeoutException as e:
         return HealthDependency(
             name=HealthDependencyName.llama_cpp,
-            status=HealthDependencyStatus.unavailable,
-            critical=bool(settings.llamacpp_critical),
+            status=HealthDependencyStatus.unavailable
+            if is_critical
+            else HealthDependencyStatus.degraded,
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="timeout", error_class=e.__class__.__name__),
@@ -304,8 +322,10 @@ def probe_llama_cpp(settings: HealthcheckSettings) -> HealthDependency:
     except Exception as e:
         return HealthDependency(
             name=HealthDependencyName.llama_cpp,
-            status=HealthDependencyStatus.unavailable,
-            critical=bool(settings.llamacpp_critical),
+            status=HealthDependencyStatus.unavailable
+            if is_critical
+            else HealthDependencyStatus.degraded,
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="connection_failed", error_class=e.__class__.__name__),
@@ -316,11 +336,13 @@ def probe_provider(settings: HealthcheckSettings) -> HealthDependency:
     started = time.perf_counter()
     checked_at = _now_iso()
 
+    is_critical = False
+
     if not settings.provider_healthcheck_url.strip():
         return HealthDependency(
             name=HealthDependencyName.provider,
             status=HealthDependencyStatus.unavailable,
-            critical=False,
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="not_configured"),
@@ -343,15 +365,17 @@ def probe_provider(settings: HealthcheckSettings) -> HealthDependency:
             return HealthDependency(
                 name=HealthDependencyName.provider,
                 status=HealthDependencyStatus.ok,
-                critical=False,
+                critical=is_critical,
                 latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
                 checked_at=checked_at,
                 details=None,
             )
         return HealthDependency(
             name=HealthDependencyName.provider,
-            status=HealthDependencyStatus.unavailable,
-            critical=False,
+            status=HealthDependencyStatus.unavailable
+            if is_critical
+            else HealthDependencyStatus.degraded,
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="unexpected_response"),
@@ -359,8 +383,10 @@ def probe_provider(settings: HealthcheckSettings) -> HealthDependency:
     except httpx.TimeoutException as e:
         return HealthDependency(
             name=HealthDependencyName.provider,
-            status=HealthDependencyStatus.unavailable,
-            critical=False,
+            status=HealthDependencyStatus.unavailable
+            if is_critical
+            else HealthDependencyStatus.degraded,
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="timeout", error_class=e.__class__.__name__),
@@ -368,8 +394,10 @@ def probe_provider(settings: HealthcheckSettings) -> HealthDependency:
     except Exception as e:
         return HealthDependency(
             name=HealthDependencyName.provider,
-            status=HealthDependencyStatus.unavailable,
-            critical=False,
+            status=HealthDependencyStatus.unavailable
+            if is_critical
+            else HealthDependencyStatus.degraded,
+            critical=is_critical,
             latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
             checked_at=checked_at,
             details=HealthDependencyDetails(reason="connection_failed", error_class=e.__class__.__name__),

@@ -4,28 +4,40 @@ import ChatMessage from './ChatMessage';
 import ContextPanel from './ContextPanel';
 import { Message, Evidence, Scenario } from '../types';
 import { useTranslation } from 'react-i18next';
-
+import { ErrorResponseSchema } from '../schemas/errorResponse';
+import { EvidenceChainSchema } from '../schemas/evidenceChain';
+import type { EvidenceChain } from '../schemas/evidenceChain';
+import type { Evidence as ContractEvidence } from '../schemas/evidence';
+import {
+  createEmptyEvidenceViewModel,
+  mergeEvidenceViewModel,
+  type EvidenceViewModel,
+} from '../schemas/evidenceViewModel';
+import { loadWebRuntimeConfig } from '../runtimeConfig';
+import { useChatSseStream } from '../hooks/useChatSseStream';
 
 interface Props {
   activeScenario: Scenario;
 }
 
-const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
+ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
   const { t, i18n } = useTranslation();
   const normalizedLanguage = (i18n.resolvedLanguage || i18n.language || 'zh').startsWith('en') ? 'en' : 'zh';
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const [activeEvidence, setActiveEvidence] = useState<Evidence | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
+  const [activeEvidenceChain, setActiveEvidenceChain] = useState<EvidenceChain | null>(null);
+  const [activeEvidenceViewModel, setActiveEvidenceViewModel] = useState<EvidenceViewModel | null>(null);
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [userId, setUserId] = useState<string>('');
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [manualRetryMessage, setManualRetryMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastUserMessageRef = useRef<string>('');
 
-  const apiBaseUrl = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8000';
-  const tenantId = (import.meta as any).env?.VITE_TENANT_ID || 't1';
-  const projectId = (import.meta as any).env?.VITE_PROJECT_ID || 'p1';
+  const { apiBaseUrl, tenantId, projectId, sseReconnect, sseTimeouts } = loadWebRuntimeConfig();
 
   const createRequestId = () => {
     try {
@@ -35,21 +47,265 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
     }
   };
 
+  const handleEvidenceClick = async (ev: Evidence) => {
+    setActiveEvidenceId(ev.id);
+    setActiveEvidenceChain(null);
+    if (!accessToken) return;
+    if (!activeRequestId) return;
+
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/v1/evidence/chains/${activeRequestId}`, {
+        method: 'GET',
+        headers: {
+          ...buildBaseHeaders(activeRequestId),
+          'Authorization': `Bearer ${accessToken}`,
+        },
+      });
+      if (!res.ok) {
+        return;
+      }
+      const body = await res.json();
+      const chain = (body as any)?.evidenceChain;
+      const parsed = EvidenceChainSchema.safeParse(chain);
+      if (!parsed.success) {
+        return;
+      }
+      setActiveEvidenceChain(parsed.data);
+    } catch {
+      return;
+    }
+  };
+
   const buildBaseHeaders = (requestId: string) => ({
     'X-Tenant-Id': tenantId,
     'X-Project-Id': projectId,
     'X-Request-Id': requestId,
   });
 
+  const toUiEvidence = (ev: ContractEvidence): Evidence => {
+    const sourceSystem = ev.sourceSystem || 'Unknown';
+    const type = sourceSystem === 'SAP' || sourceSystem === 'MES' || sourceSystem === 'DCS' || sourceSystem === 'IoT'
+      ? sourceSystem
+      : 'Manual';
+    return {
+      id: ev.evidenceId,
+      source: sourceSystem,
+      timestamp: ev.timeRange?.end || new Date().toISOString(),
+      confidence: ev.confidence,
+      details: JSON.stringify(ev.sourceLocator ?? {}),
+      type,
+      validation: ev.validation,
+    };
+  };
+
+  const mergeEvidencePills = (existing: Evidence[] | undefined, incoming: Evidence[]): Evidence[] => {
+    const byId: Record<string, Evidence> = {};
+    const warnings: Array<{ evidenceId: string; field: string; oldValue: string; newValue: string }> = [];
+    
+    for (const e of existing || []) {
+      byId[e.id] = e;
+    }
+    
+    for (const e of incoming) {
+      const prev = byId[e.id];
+      if (prev) {
+        if (prev.source !== e.source) {
+          warnings.push({
+            evidenceId: e.id,
+            field: 'source',
+            oldValue: prev.source,
+            newValue: e.source,
+          });
+        }
+        if (prev.type !== e.type) {
+          warnings.push({
+            evidenceId: e.id,
+            field: 'type',
+            oldValue: prev.type,
+            newValue: e.type,
+          });
+        }
+        if (prev.validation === 'verifiable' && e.validation !== 'verifiable') {
+          warnings.push({
+            evidenceId: e.id,
+            field: 'validation',
+            oldValue: prev.validation,
+            newValue: e.validation,
+          });
+        }
+        if (prev.confidence !== e.confidence) {
+          warnings.push({
+            evidenceId: e.id,
+            field: 'confidence',
+            oldValue: prev.confidence,
+            newValue: e.confidence,
+          });
+        }
+
+        const invariantChanged = prev.source !== e.source || prev.type !== e.type;
+        byId[e.id] = invariantChanged
+          ? {
+              ...e,
+              source: prev.source,
+              type: prev.type,
+              validation: 'mismatch',
+            }
+          : e;
+        continue;
+      }
+      byId[e.id] = e;
+    }
+    
+    if (warnings.length > 0) {
+      console.warn('[mergeEvidencePills] Evidence field changes detected:', {
+        requestId: activeRequestId,
+        warnings,
+      });
+    }
+    
+    return Object.keys(byId).sort().map((k) => byId[k]);
+  };
+
   const getErrorCode = async (res: Response): Promise<string | null> => {
     try {
-      const body = await res.json();
-      const code = (body as any)?.code;
-      return typeof code === 'string' ? code : null;
+      const bodyUnknown: unknown = await res.json();
+      const parsed = ErrorResponseSchema.safeParse(bodyUnknown);
+      return parsed.success ? parsed.data.code : null;
     } catch {
       return null;
     }
   };
+
+  const stream = useChatSseStream({
+    apiBaseUrl,
+    tenantId,
+    projectId,
+    accessToken: accessToken || '',
+    sseReconnect,
+    sseTimeouts,
+    createRequestId,
+    onMessageDelta: ({ requestId, sessionId, delta }) => {
+      console.debug('[onMessageDelta]', { requestId, sessionId, deltaLength: delta.length });
+      const assistantMessageId = `sse-${requestId}`;
+      setMessages(prev => prev.map(m => (
+        m.id === assistantMessageId
+          ? { ...m, content: (m.content || '') + delta }
+          : m
+      )));
+    },
+    onProgress: ({ requestId, sessionId, payload }) => {
+      console.debug('[onProgress]', { requestId, sessionId, stage: payload.stage });
+      const assistantMessageId = `sse-${requestId}`;
+      setMessages(prev => prev.map(m => (
+        m.id === assistantMessageId
+          ? { ...m, content: (m.content || '') + payload.message }
+          : m
+      )));
+    },
+    onWarning: ({ requestId, sessionId, sequence, timestamp, tenantId, projectId, payload }) => {
+      console.warn('[onWarning]', { requestId, sessionId, code: payload.code, message: payload.message });
+      setActiveEvidenceViewModel((prev) => {
+        const base =
+          prev ||
+          createEmptyEvidenceViewModel({
+            requestId,
+            tenantId,
+            projectId,
+            sessionId,
+          });
+        return mergeEvidenceViewModel({
+          prev: base,
+          incomingWarning: { code: payload.code, message: payload.message, details: payload.details ?? null },
+          meta: { requestId, tenantId, projectId, sessionId, sequence, timestamp },
+        });
+      });
+      setMessages((prev) => ([
+        ...prev,
+        {
+          id: `warn-${Date.now()}`,
+          role: 'assistant',
+          content: payload.message,
+          timestamp: Date.now(),
+        },
+      ]));
+    },
+    onFinal: ({ requestId, sessionId, sequence, timestamp, tenantId, projectId, payload }) => {
+      console.debug('[onFinal]', { requestId, sessionId, status: payload.status });
+      setActiveEvidenceViewModel((prev) => {
+        const base =
+          prev ||
+          createEmptyEvidenceViewModel({
+            requestId,
+            tenantId,
+            projectId,
+            sessionId,
+          });
+        return mergeEvidenceViewModel({
+          prev: base,
+          incomingFinalStatus: payload.status,
+          meta: { requestId, tenantId, projectId, sessionId, sequence, timestamp },
+        });
+      });
+      setAttachments([]);
+    },
+    onEvidenceUpdate: ({ requestId, sessionId, sequence, timestamp, tenantId, projectId, payload }) => {
+      console.debug('[onEvidenceUpdate]', { requestId, sessionId, mode: payload.mode, evidenceCount: payload.evidences?.length });
+      if (!payload.evidences || payload.evidences.length === 0) return;
+
+      setActiveEvidenceViewModel((prev) => {
+        const base =
+          prev ||
+          createEmptyEvidenceViewModel({
+            requestId,
+            tenantId,
+            projectId,
+            sessionId,
+          });
+        return mergeEvidenceViewModel({
+          prev: base,
+          incomingEvidences: payload.evidences,
+          meta: { requestId, tenantId, projectId, sessionId, sequence, timestamp },
+        });
+      });
+
+      const uiEvidences = payload.evidences.map(toUiEvidence);
+      const assistantMessageId = `sse-${requestId}`;
+      setMessages((prev) => prev.map((m) => (
+        m.id === assistantMessageId
+          ? { ...m, evidence: mergeEvidencePills(m.evidence, uiEvidences) }
+          : m
+      )));
+    },
+    onError: ({ requestId, sessionId, sequence, timestamp, tenantId, projectId, error }) => {
+      console.error('[onError]', { requestId, sessionId, code: error.code, message: error.message });
+      setActiveEvidenceViewModel((prev) => {
+        const base =
+          prev ||
+          createEmptyEvidenceViewModel({
+            requestId,
+            tenantId,
+            projectId,
+            sessionId,
+          });
+        return mergeEvidenceViewModel({
+          prev: base,
+          incomingError: error,
+          meta: { requestId, tenantId, projectId, sessionId, sequence, timestamp },
+        });
+      });
+      setMessages(prev => ([...prev, {
+        id: `err-${Date.now()}`,
+        role: 'assistant',
+        content: String(error.message || 'Request failed'),
+        timestamp: Date.now(),
+      }]));
+
+      if (error.retryable === false) {
+        const lastMsg = (lastUserMessageRef.current || '').trim();
+        setManualRetryMessage(lastMsg ? lastMsg : null);
+      }
+    },
+  });
 
   useEffect(() => {
     // Reset chat when scenario changes
@@ -60,7 +316,8 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
         timestamp: Date.now()
     }]);
     setInput(t(activeScenario.initialMessage, { lng: normalizedLanguage }));
-    setActiveEvidence(null);
+    setActiveEvidenceId(null);
+    setActiveEvidenceViewModel(null);
     try {
       const persisted = localStorage.getItem('gangqing.accessToken');
       setAccessToken(persisted && persisted.trim() ? persisted : null);
@@ -99,8 +356,11 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
           }
           throw new Error(`LOGIN_FAILED_${res.status}`);
         }
-        const data = await res.json();
-        const token = (data as any)?.accessToken;
+        const dataUnknown: unknown = await res.json();
+        const token =
+          (typeof dataUnknown === 'object' && dataUnknown && 'accessToken' in dataUnknown)
+            ? (dataUnknown as Record<string, unknown>).accessToken
+            : null;
         if (typeof token !== 'string' || !token.trim()) {
           throw new Error('MISSING_TOKEN');
         }
@@ -112,7 +372,7 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
           // ignore
         }
       } catch (e) {
-        const errMsg = String((e as any)?.message || e);
+        const errMsg = String((e as { message?: unknown } | null)?.message || e);
         setMessages(prev => ([...prev, {
           id: `err-${Date.now()}`,
           role: 'assistant',
@@ -124,6 +384,14 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
 
     void login();
   }, [activeScenario]);
+
+  useEffect(() => {
+    return () => {
+      if (stream.isProcessing) {
+        void stream.cancelActiveRequest();
+      }
+    };
+  }, [stream]);
 
   const handlePickFile = () => {
     fileInputRef.current?.click();
@@ -151,8 +419,14 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
       throw new Error(`Upload failed (${res.status})`);
     }
 
-    const data = await res.json();
-    const url = data.attachment_url as string;
+    const dataUnknown: unknown = await res.json();
+    const url =
+      (typeof dataUnknown === 'object' && dataUnknown && 'attachment_url' in dataUnknown)
+        ? (dataUnknown as Record<string, unknown>).attachment_url
+        : null;
+    if (typeof url !== 'string' || !url.trim()) {
+      throw new Error('UPLOAD_MISSING_ATTACHMENT_URL');
+    }
     setAttachments(prev => [...prev, url]);
   };
 
@@ -160,95 +434,99 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
+  const createUserMessage = (content: string): Message => ({
+    id: Date.now().toString(),
+    role: 'user',
+    content,
+    timestamp: Date.now(),
+  });
 
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: input,
-      timestamp: Date.now()
-    };
+  const createAssistantMessage = (requestId: string): Message => ({
+    id: `sse-${requestId}`,
+    role: 'assistant',
+    content: '',
+    timestamp: Date.now(),
+  });
 
+  const createErrorMessage = (content: string): Message => ({
+    id: `err-${Date.now()}`,
+    role: 'assistant',
+    content,
+    timestamp: Date.now(),
+  });
+
+  const clearAccessToken = () => {
+    try {
+      localStorage.removeItem('gangqing.accessToken');
+    } catch {
+      // ignore
+    }
+    setAccessToken(null);
+  };
+
+  const getErrorContent = (errMsg: string): string => {
+    if (errMsg === 'AUTH_ERROR') return t('chat.authError');
+    if (errMsg === 'FORBIDDEN') return t('chat.forbidden');
+    return t('chat.requestError');
+  };
+
+  const startStream = async (content: string) => {
+    if (!content.trim()) return;
+
+    const userMsg = createUserMessage(content);
     setMessages(prev => [...prev, userMsg]);
     setInput('');
-    setIsProcessing(true);
+    lastUserMessageRef.current = content;
+    setManualRetryMessage(null);
+
+    if (!accessToken) {
+      setMessages(prev => [...prev, createErrorMessage(t('chat.missingToken'))]);
+      return;
+    }
 
     try {
-      if (!accessToken) {
-        throw new Error(t('chat.missingToken'));
-      }
-
       const requestId = createRequestId();
-      const res = await fetch(`${apiBaseUrl}/api/v1/chat`, {
-        method: 'POST',
-        headers: {
-          ...buildBaseHeaders(requestId),
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          session_id: `web-${activeScenario.id}`,
-          message: userMsg.content,
-          user_id: userId || 'web-user',
-          user_role: activeScenario.role,
-          attachments,
-          language: normalizedLanguage,
-        }),
-      });
+      setActiveRequestId(requestId);
+      setActiveEvidenceChain(null);
+      setMessages(prev => [...prev, createAssistantMessage(requestId)]);
 
-      if (!res.ok) {
-        const code = await getErrorCode(res);
-        if (res.status === 401 || code === 'AUTH_ERROR') {
-          throw new Error('AUTH_ERROR');
-        }
-        if (res.status === 403 || code === 'FORBIDDEN') {
-          throw new Error('FORBIDDEN');
-        }
-        throw new Error(`CHAT_FAILED_${res.status}`);
+      const result = await stream.sendMessage(userMsg.content, requestId);
+      if ('code' in result) {
+        if (result.code === 'AUTH_ERROR') throw new Error('AUTH_ERROR');
+        if (result.code === 'FORBIDDEN') throw new Error('FORBIDDEN');
+        throw new Error('CHAT_FAILED_STREAM');
       }
-
-      const data = await res.json();
-
-      const responseMsg: Message = {
-        id: data.message_id || (Date.now() + 1).toString(),
-        role: 'assistant',
-        timestamp: Date.now(),
-        content: data.content || '',
-        evidence: data.evidence_chain || [],
-        chartData: data.chart_data || undefined,
-        chartType: data.chart_type || undefined,
-        actions: data.actions || undefined,
-      };
-
-      setMessages(prev => [...prev, responseMsg]);
-      setAttachments([]);
     } catch (e) {
-      const errMsg = String((e as any)?.message || e);
-      const content =
-        errMsg === 'AUTH_ERROR'
-          ? t('chat.authError')
-          : errMsg === 'FORBIDDEN'
-            ? t('chat.forbidden')
-            : t('chat.requestError');
-
-      if (errMsg === 'AUTH_ERROR') {
-        try {
-          localStorage.removeItem('gangqing.accessToken');
-        } catch {
-          // ignore
-        }
-        setAccessToken(null);
-      }
-      setMessages(prev => ([...prev, {
-        id: `err-${Date.now()}`,
-        role: 'assistant',
-        content,
-        timestamp: Date.now(),
-      }]));
-    } finally {
-      setIsProcessing(false);
+      const errMsg = String((e as { message?: unknown } | null)?.message || e);
+      if (errMsg === 'AUTH_ERROR') clearAccessToken();
+      setMessages(prev => [...prev, createErrorMessage(getErrorContent(errMsg))]);
+      const lastMsg = (lastUserMessageRef.current || '').trim();
+      setManualRetryMessage(lastMsg ? lastMsg : null);
     }
+  };
+
+  const handleSend = async () => {
+    if (!input.trim()) return;
+    await startStream(input);
+  };
+
+  const handleManualRetry = async () => {
+    const msg = (manualRetryMessage || '').trim();
+    if (!msg) return;
+    await startStream(msg);
+  };
+
+  const handleCancel = async () => {
+    await stream.cancelActiveRequest();
+    setMessages((prev) => ([
+      ...prev,
+      {
+        id: `cancel-${Date.now()}`,
+        role: 'assistant',
+        content: t('chat.cancelled'),
+        timestamp: Date.now(),
+      },
+    ]));
   };
 
   return (
@@ -261,10 +539,10 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
             <ChatMessage 
                 key={msg.id} 
                 message={msg} 
-                onEvidenceClick={(ev) => setActiveEvidence(ev)} 
+                onEvidenceClick={(ev) => { void handleEvidenceClick(ev); }} 
             />
           ))}
-          {isProcessing && (
+          {stream.isProcessing && (
              <div className="p-6">
                 <div className="flex items-center gap-2 text-molten-500 text-sm animate-pulse">
                     <span className="w-2 h-2 bg-molten-500 rounded-full"></span>
@@ -324,12 +602,31 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
                 </button>
                 <button 
                     onClick={handleSend}
-                    disabled={!input.trim() || isProcessing}
+                    disabled={!input.trim() || stream.isProcessing}
                     className="p-3 bg-molten-600 hover:bg-molten-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-molten-500/20"
                 >
                     <Send size={18} />
                 </button>
+                {stream.isProcessing && (
+                  <button
+                    onClick={handleCancel}
+                    className="p-3 bg-steel-700 hover:bg-steel-600 text-slate-200 rounded-lg transition-colors"
+                  >
+                    {t('chat.stop')}
+                  </button>
+                )}
             </div>
+            {manualRetryMessage && !stream.isProcessing && (
+              <div className="mt-3 flex justify-end">
+                <button
+                  onClick={handleManualRetry}
+                  className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium bg-steel-700 hover:bg-steel-600 text-slate-200 transition-colors"
+                >
+                  <RotateCcw size={16} />
+                  {t('chat.retry')}
+                </button>
+              </div>
+            )}
             <div className="text-center mt-2">
                  <p className="text-xs text-slate-500">{t('chat.disclaimer')}</p>
             </div>
@@ -338,7 +635,16 @@ const ChatInterface: React.FC<Props> = ({ activeScenario }) => {
       </div>
 
       {/* Right Panel */}
-      <ContextPanel evidence={activeEvidence} onClose={() => setActiveEvidence(null)} />
+      <ContextPanel
+        selectedEvidenceId={activeEvidenceId}
+        evidenceViewModel={activeEvidenceViewModel}
+        evidenceChain={activeEvidenceChain}
+        onClose={() => {
+          setActiveEvidenceId(null);
+          setActiveEvidenceChain(null);
+          setActiveEvidenceViewModel(null);
+        }}
+      />
     </div>
   );
 };

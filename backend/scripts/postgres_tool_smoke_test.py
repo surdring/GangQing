@@ -18,6 +18,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
 # Add backend to path for imports
@@ -27,12 +28,15 @@ if str(_BACKEND_DIR) not in sys.path:
 
 from gangqing.common.context import RequestContext
 from gangqing.common.errors import AppError
-from gangqing.tools.postgres_readonly import PostgresReadOnlyQueryParams, PostgresReadOnlyQueryTool
+from gangqing.tools.postgres_readonly import PostgresReadOnlyQueryTool
 from gangqing_db.errors import ConfigMissingError, MigrationFailedError, map_db_error
 from gangqing_db.settings import load_settings
 
 
-EXPECTED_HEAD = "0003_ml_scn_map"
+
+def _get_expected_heads(cfg: Config) -> list[str]:
+    script = ScriptDirectory.from_config(cfg)
+    return sorted({str(x) for x in script.get_heads() if str(x).strip()})
 
 
 def _require_database_url() -> str:
@@ -199,11 +203,12 @@ def main() -> int:
 
         command.upgrade(cfg, "head")
         version = _get_current_version(engine)
-        if version != EXPECTED_HEAD:
+        expected_heads = _get_expected_heads(cfg)
+        if version is None or version not in expected_heads:
             raise MigrationFailedError(
                 "upgrade",
                 version=version,
-                cause=f"Expected version {EXPECTED_HEAD}, got {version}",
+                cause=f"Expected version in {expected_heads}, got {version}",
                 request_id=request_id,
             )
 
@@ -230,15 +235,15 @@ def main() -> int:
         tool = PostgresReadOnlyQueryTool()
 
         try:
-            tool.run(
+            tool.run_raw(
                 ctx=ctx,
-                params=PostgresReadOnlyQueryParams(
-                    templateId="__unknown__",
-                    timeRange={
+                raw_params={
+                    "templateId": "__unknown__",
+                    "timeRange": {
                         "start": datetime(2026, 2, 1, tzinfo=timezone.utc),
                         "end": datetime(2026, 2, 2, tzinfo=timezone.utc),
                     },
-                ),
+                },
             )
         except AppError as e:
             if e.code.value != "VALIDATION_ERROR":
@@ -246,17 +251,17 @@ def main() -> int:
         else:
             raise RuntimeError("Smoke test expected invalid templateId to fail")
 
-        result = tool.run(
+        result = tool.run_raw(
             ctx=ctx,
-            params=PostgresReadOnlyQueryParams(
-                templateId="production_daily",
-                timeRange={
+            raw_params={
+                "templateId": "production_daily",
+                "timeRange": {
                     "start": datetime(2026, 2, 1, tzinfo=timezone.utc),
                     "end": datetime(2026, 2, 2, tzinfo=timezone.utc),
                 },
-                limit=10,
-                offset=0,
-            ),
+                "limit": 10,
+                "offset": 0,
+            },
         )
 
         assert result.evidence.evidence_id

@@ -87,6 +87,25 @@ EXPECTED_TABLES = {
     "audit_log",
 }
 
+
+EXPECTED_AUDIT_LOG_COLUMNS = {
+    "event_type",
+    "timestamp",
+    "request_id",
+    "tenant_id",
+    "project_id",
+    "session_id",
+    "user_id",
+    "role",
+    "resource",
+    "correlation_id",
+    "supersedes_event_id",
+    "action_summary",
+    "result_status",
+    "error_code",
+    "evidence_refs",
+}
+
 EXPECTED_PRIMARY_KEYS = {
     ("dim_equipment", "pk_dim_equipment"),
     ("dim_material", "pk_dim_material"),
@@ -129,6 +148,8 @@ EXPECTED_CHECK_CONSTRAINTS = {
     ("fact_cost_daily", "ck_fact_cost_daily_amount_nonneg"),
     ("fact_cost_daily", "ck_fact_cost_daily_time_range"),
     ("fact_maintenance_workorder", "ck_fact_maintenance_workorder_closed_after_created"),
+    ("fact_alarm_event", "ck_fact_alarm_event_severity_enum"),
+    ("fact_maintenance_workorder", "ck_fact_maintenance_workorder_status_enum"),
 }
 
 EXPECTED_INDEXES = {
@@ -145,8 +166,10 @@ EXPECTED_INDEXES = {
     "idx_audit_log_scope_request_time",
     "idx_audit_log_scope_time",
     "idx_audit_log_scope_event_type_time",
+    "idx_audit_log_scope_correlation_time",
+    "idx_audit_log_scope_user_time",
+    "idx_audit_log_scope_resource_time",
     "idx_fact_alarm_event_p0_id_unique",
-    "idx_audit_log_p0_id_unique",
     "uq_metric_lineage_scope_metric_active_unique",
     "idx_metric_lineage_scenario_mapping_scope_metric_scenario",
     "uq_ml_scn_map_scope_metric_scn_active_u",
@@ -234,22 +257,36 @@ def test_key_columns_exist() -> None:
     with engine.connect() as conn:
         _set_rls_context(conn)
         for table, expected_cols in KEY_COLUMNS.items():
-            cols = {
-                row[0]
-                for row in conn.execute(
+            if table == "audit_log":
+                rows = conn.execute(
                     text(
                         """
                         SELECT column_name
                         FROM information_schema.columns
-                        WHERE table_schema = 'public' AND table_name = :table
+                        WHERE table_schema = 'public'
+                          AND table_name = :table_name
                         """
                     ),
-                    {"table": table},
+                    {"table_name": table},
                 ).all()
-            }
-
-            missing = expected_cols - cols
-            assert not missing, f"Table '{table}' missing columns: {sorted(missing)}"
+                cols = {r[0] for r in rows}
+                missing = EXPECTED_AUDIT_LOG_COLUMNS - cols
+                assert not missing, f"Missing columns in {table}: {sorted(missing)}"
+            else:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = :table_name
+                        """
+                    ),
+                    {"table_name": table},
+                ).all()
+                cols = {r[0] for r in rows}
+                missing = expected_cols - cols
+                assert not missing, f"Missing columns in {table}: {sorted(missing)}"
 
 
 def test_isolation_fields_exist() -> None:

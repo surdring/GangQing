@@ -121,6 +121,12 @@ def test_seed_edge_cases_evidence_must_exist_and_be_queryable() -> None:
     assert "duplicate" in edge_types
     assert "extreme" in edge_types
 
+    for item in evidence:
+        assert item.get("dataset_version") == params.edge_cases.dataset_version
+        natural_key = item.get("natural_key")
+        assert isinstance(natural_key, str)
+        assert params.edge_cases.dataset_version in natural_key
+
     # Evidence-first: table + primary_key must resolve.
     engine = create_engine(database_url, pool_pre_ping=True)
     with engine.connect() as conn:
@@ -315,7 +321,7 @@ def test_seed_edge_case_duplicate_alarm_samples_must_have_at_least_two_rows() ->
             },
         ).scalar_one()
 
-    assert dup_alarm >= 1
+    assert dup_alarm >= 2
 
 
 def test_seed_edge_cases_missing_config_must_fail(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -19,10 +19,20 @@ _SENSITIVE_KEY_FRAGMENTS = (
 
 _REDACTED_VALUE = "[REDACTED]"
 
+_SENSITIVE_VALUE_FRAGMENTS = (
+    "postgresql://",
+    "psycopg://",
+    "authorization:",
+    "bearer ",
+)
+
 
 def redact_sensitive(value: Any) -> Any:
     if value is None:
         return None
+
+    if isinstance(value, str):
+        return _redact_sensitive_string(value)
 
     if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
@@ -38,6 +48,13 @@ def redact_sensitive(value: Any) -> Any:
         return [redact_sensitive(v) for v in value]
 
     return value
+
+
+def _redact_sensitive_string(text: str) -> str:
+    lowered = text.lower()
+    if any(frag in lowered for frag in _SENSITIVE_VALUE_FRAGMENTS):
+        return _REDACTED_VALUE
+    return text
 
 
 def _is_sensitive_key(key: str) -> bool:

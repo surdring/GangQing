@@ -4,10 +4,14 @@ import uuid
 
 from fastapi import Header
 from fastapi import Request
+import structlog
 from pydantic import BaseModel
 from pydantic import Field
 
 from gangqing.common.errors import AppError, ErrorCode
+
+
+logger = structlog.get_logger(__name__)
 
 
 class RequestContext(BaseModel):
@@ -58,6 +62,11 @@ def build_request_context(
     tenant_id_from_state = getattr(getattr(request, "state", None), "tenant_id", None)
     tenant_id = ((tenant_id_from_state or "").strip() or (x_tenant_id or "").strip())
     if not tenant_id:
+        logger.warning(
+            "request_context_missing_scope",
+            requestId=request_id,
+            missingHeader="X-Tenant-Id",
+        )
         raise AppError(
             ErrorCode.AUTH_ERROR,
             "Missing required header: X-Tenant-Id",
@@ -69,6 +78,12 @@ def build_request_context(
     project_id_from_state = getattr(getattr(request, "state", None), "project_id", None)
     project_id = ((project_id_from_state or "").strip() or (x_project_id or "").strip())
     if not project_id:
+        logger.warning(
+            "request_context_missing_scope",
+            requestId=request_id,
+            tenantId=tenant_id,
+            missingHeader="X-Project-Id",
+        )
         raise AppError(
             ErrorCode.AUTH_ERROR,
             "Missing required header: X-Project-Id",

@@ -47,6 +47,32 @@ _TEMPLATES: dict[str, PostgresQueryTemplate] = {
             "extracted_at",
         ],
     ),
+    "production_daily_slow": PostgresQueryTemplate(
+        template_id="production_daily_slow",
+        description="Daily production facts (slow query probe)",
+        table_or_view="fact_production_daily",
+        time_field="time_start",
+        base_select_sql=(
+            "SELECT tenant_id, project_id, pg_sleep(1) AS __sleep, "
+            "business_date, equipment_id::text AS equipment_id, "
+            "quantity, unit, source_system, source_record_id, time_start, time_end, extracted_at "
+            "FROM fact_production_daily"
+        ),
+        allowed_filter_fields={"business_date", "equipment_id"},
+        allowed_order_by_fields={"business_date", "quantity"},
+        required_hidden_fields={"tenant_id", "project_id"},
+        exposed_fields=[
+            "business_date",
+            "equipment_id",
+            "quantity",
+            "unit",
+            "source_system",
+            "source_record_id",
+            "time_start",
+            "time_end",
+            "extracted_at",
+        ],
+    ),
     "energy_daily": PostgresQueryTemplate(
         template_id="energy_daily",
         description="Daily energy facts",

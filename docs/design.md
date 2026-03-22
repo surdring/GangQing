@@ -26,6 +26,7 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - 需求文档：`.kiro/specs/gangqing/requirements.md`
 - 产品需求文档：`docs/产品需求.md`
 - 技术设计文档：`docs/技术设计文档-最佳实践版.md`
+- 核心组件技术方案（架构设计版）：`docs/GangQing 自研 AI Copilot 核心组件技术方案(架构设计版).md`
 - 对外契约草案：`docs/contracts/api-and-events-draft.md`
 - 项目现状分析：`docs/项目现状分析.md`
 
@@ -77,6 +78,11 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 6. **模型推理层**：llama.cpp 本地模型
 7. **可观测与审计层**：日志、追踪、指标收集
 
+补充说明（核心组件视角）：
+
+- **前端核心**：`useGangQingChat`（借鉴 CopilotKit 设计模式但不直接依赖）负责 SSE 连接管理、事件解析分发、错误/取消/重连状态机与 Zod 契约校验；Context Panel 负责 Evidence 增量渲染与降级态表达。
+- **后端核心**：RequestContext 通过 FastAPI Depends 显式注入；SSE 统一 Envelope 强制字段与序列号；工具通过“装饰器声明式注册”实现 RBAC/脱敏/审计/Evidence/超时重试等一致性；Evidence 引擎对数值结论强制可追溯并输出增量事件；只读默认门禁负责写操作治理入口（L4）。
+
 ### 2.2 交互层设计
 
 #### 2.2.1 三栏式布局
@@ -91,6 +97,11 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - 支持实时进度反馈和增量内容渲染
 - 断线自动重连机制
 
+补充约束：
+
+- SSE 客户端必须实现状态机（`idle/connecting/streaming/error/done`），并在断线时采用指数退避重连。
+- 客户端取消（用户停止生成/离开页面/关闭连接）必须向下传播，触发服务端停止推理与停止工具调用。
+
 ### 2.3 API 网关层设计
 
 #### 2.3.1 核心职责
@@ -98,8 +109,14 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - 用户认证与会话管理（JWT token）
 - RBAC 权限检查
 - SSE 事件编排与流控
-- 请求上下文贯穿（requestId 生成与传递）
+- 请求上下文贯穿（RequestContext：requestId/tenantId/projectId 等）
 - 统一错误模型输出
+
+补充约束：
+
+- tenantId/projectId 必须存在且合法；缺失必须拒绝请求并记录审计
+- requestId 允许缺失：服务端自动生成并在响应与 SSE 事件中回传
+- RequestContext 优先使用依赖注入（FastAPI Depends）显式注入，避免隐式中间件依赖
 
 #### 2.3.2 请求处理流程
 
@@ -160,6 +177,11 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - 统一接口规范
 - 配置化工具注册
 
+补充约束：
+
+- 工具注册建议采用“装饰器声明式注册”模式，以减少样板代码并强制一致性
+- 装饰器层需自动化执行：RBAC + 数据域过滤 + 参数 schema 校验 + 脱敏 + 审计 + Evidence 生成 + 超时与重试
+
 ### 2.6 数据层设计
 
 #### 2.6.1 数据模型
@@ -205,7 +227,7 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 #### 2.8.1 审计日志
 
 - 用户查询（query）
-- 工具调用（tool_call，参数摘要脱敏）
+- 工具调用（tool.call，参数摘要脱敏）
 - 响应结果（response 摘要 + evidence 引用）
 - 错误（error code/message/requestId）
 - 审批动作与写操作（L4 预留）
@@ -229,6 +251,121 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
   - 模型与数据库凭证仅由服务端持有；前端不得持有高权限凭证。
   - 工具调用凭证按“工具粒度”隔离，遵循最小权限原则。
 - **审计与脱敏**：配置与密钥不得写入审计日志；日志中如需记录配置项，只允许记录配置项名称与非敏感摘要。
+
+### 2.10 核心组件设计（自研 Copilot Core）
+
+本节补齐系统在 L1-L4 分期内的“AI Copilot 核心组件”设计要点。该部分借鉴 CopilotKit 的优秀设计模式，但不直接依赖 CopilotKit。
+
+#### 2.10.1 前端：上下文感知与流式渲染（useGangQingChat）
+
+设计目标：参考 CopilotKit 的 `useCopilotChat` 思路，封装 SSE 连接复杂性，对 UI 提供声明式 Hook 接口。
+
+核心能力：
+
+| 能力 | 说明 |
+|------|------|
+| **SSE 连接管理** | 自动连接/断开/重连（指数退避） |
+| **事件解析** | 统一解析 SSE Envelope，按 `type` 分发 |
+| **状态管理** | `idle/connecting/streaming/error/done` |
+| **错误处理** | 解析结构化错误（`code/message/retryable/requestId`） |
+| **取消传播** | 客户端断开/取消必须向下传播，服务端停止推理/工具调用 |
+| **Zod 校验** | 运行时校验 SSE 事件契约（前端 schema 为单一事实源） |
+| **证据链管理** | 处理 `evidence.update` 事件并增量更新 Evidence 列表 |
+
+关键设计决策（摘录）：
+
+- 不直接使用 CopilotKit 的 `useCopilotChat`：GangQing 需要严格事件 Envelope（`requestId/tenantId/projectId/sequence`）、结构化错误与 Evidence 增量更新，以及 Zod 运行时契约校验。
+- 平衡复用与定制：复用“连接管理/重连策略/状态机模式”，定制“事件解析、错误处理、证据链管理与契约校验”。
+
+#### 2.10.2 前端：Context Panel（证据链可视化）
+
+设计目标：直观展示数据来源与计算过程，支持降级态表达。
+
+核心能力：
+
+- Trust Pill：关键数值以“数值胶囊”形式展示，可悬停查看来源摘要。
+- Evidence 展开：点击胶囊可展开完整 Evidence（数据源、时间范围、口径版本等）。
+- 降级态表达：缺失/不可验证/冲突时展示差异化样式并提示原因。
+- 可追溯性：支持跳转到原始数据源入口（如 ERP 报表、MES 工单）。
+
+#### 2.10.3 后端：RequestContext 自动注入（FastAPI Depends）
+
+设计目标：借鉴上下文管理模式，通过依赖注入提取并强制校验上下文字段，确保 requestId/tenantId/projectId 全链路贯穿。
+
+核心约束：
+
+- `tenantId/projectId` 必须存在且合法，缺失必须拒绝请求并审计。
+- `requestId` 允许缺失：服务端自动生成并回传。
+
+关键设计决策（摘录）：
+
+- 依赖注入优于中间件：上下文依赖显式声明，易测试且类型更清晰；避免隐式全局副作用。
+- tenantId/projectId 禁止默认值：避免安全降级与跨域访问风险。
+
+#### 2.10.4 后端：工具装饰器自动注册（Tool Decorator）
+
+设计目标：参考 CopilotKit 的 action 注册模式，用装饰器进行声明式工具注册，并在装饰器层自动化执行一致性约束。
+
+自动化能力矩阵：
+
+| 能力 | 说明 |
+|------|------|
+| **声明式注册** | 装饰器声明工具元信息 |
+| **RBAC 检查** | 基于 capabilities 自动检查权限 |
+| **数据域过滤** | 基于 `ctx.tenant_id/project_id` 自动过滤 |
+| **参数校验** | Pydantic 自动校验工具参数 |
+| **脱敏输出** | 依据 masking_policy 自动脱敏 |
+| **审计记录** | 自动记录 `tool.call/tool.result` |
+| **Evidence 生成** | 自动生成 Citation/Lineage/ToolCallTrace |
+| **超时重试** | 按工具策略执行超时控制与重试 |
+
+失败处理（摘要）：参数校验失败映射 `VALIDATION_ERROR`；RBAC 拒绝映射 `FORBIDDEN`；超时映射 `UPSTREAM_TIMEOUT`；其他异常映射 `INTERNAL_ERROR`（并按对外契约落为结构化错误）。
+
+#### 2.10.5 后端：Evidence 引擎（Evidence Engine）
+
+设计目标：GangQing 独有能力，强制所有数值结论可追溯到数据源与时间范围；计算类结论需绑定口径版本。
+
+Evidence 字段（摘要）：
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| evidenceId | ✅ | 证据唯一标识 |
+| sourceSystem/sourceLocator | ✅ | 来源系统与定位信息 |
+| timeRange | ✅ | start/end |
+| confidence | ✅ | Low/Medium/High |
+| validation | ✅ | verifiable/not_verifiable/out_of_bounds/mismatch |
+| toolCallId | - | 关联工具调用（可选） |
+| lineage_version | - | 指标口径版本（可选，但计算类建议强制） |
+| dataQualityScore | - | 数据质量评分（可选） |
+| redactions | - | 脱敏说明（可选） |
+
+降级规则（摘要）：
+
+- 数值结论缺少 Evidence：不得输出确定性数值，降级为“仅展示数据与来源”。
+- 计算结论缺少 `lineage_version`：拒绝输出或标注不确定，并输出 `warning`。
+- 数据越界/变化率异常：Evidence 标记 `out_of_bounds`，并触发 guardrail 策略。
+
+#### 2.10.6 后端：SSE Envelope 统一封装
+
+设计目标：统一 SSE 事件格式，强制字段（requestId/tenantId/projectId/sequence），便于审计与追溯。
+
+关键点：
+
+- 服务端必须保证 `sequence` 单调递增。
+- 错误事件必须与 ErrorResponse 同构，便于前端统一解析。
+
+#### 2.10.7 后端：只读默认门禁（Read-Only Default Gate）
+
+设计目标：安全红线，写操作能力仅在 L4 通过“草案→审批→受控执行→回滚→审计”治理链路开放。
+
+意图分类与策略（摘要）：
+
+| 意图类型 | 默认策略 | 门禁条件 |
+|---------|---------|---------|
+| QUERY/ANALYZE | 允许 | RBAC + 数据域 |
+| ALERT | 允许 | RBAC + 订阅权限 |
+| ACTION_PREPARE | 允许 | RBAC |
+| ACTION_EXECUTE | 拒绝 | RBAC + 审批 + 白名单 + Kill Switch |
 
 ## 3. 核心功能设计
 
@@ -298,6 +435,13 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - confidence：高/中/低
 - uncertainties：缺失数据、质量问题、假设条件
 
+补充字段（与 Evidence 引擎一致）：
+
+- validation：`verifiable/not_verifiable/out_of_bounds/mismatch`（是否可复核/是否越界/是否冲突）
+- lineage_version：指标口径版本（计算类结论强制）
+- data_quality_score：数据质量评分（0-1，可选）
+- redactions：脱敏说明（可选）
+
 #### 3.3.2 证据链约束规则
 
 - 所有数值回答必须可追溯到一个或多个 citations
@@ -324,22 +468,30 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 
 #### 3.5.1 SSE 事件模型（R6.1）
 
-**统一字段**：
+SSE 事件必须采用统一 Envelope 结构（顶层 `type` + `envelope` + `payload`）。
+
+**envelope 统一字段**：
+
 - requestId：链路追踪 ID
+- tenantId：租户/数据域标识（强制）
+- projectId：项目/产线标识（强制）
 - sessionId：会话 ID
 - timestamp：事件时间
-- type：事件类型
-- payload：事件载荷
+- sequence：单调递增序列号（用于客户端检测丢包与重排）
 
 **事件类型**：
-- progress：阶段进度
-- message.delta：回答流式增量
-- tool.call：工具调用开始
-- tool.result：工具结果摘要
-- evidence.update：证据链增量更新
-- warning：降级/不确定项提示
-- error：结构化错误
-- final：结束事件
+
+| 事件类型 | 用途 | 必填字段 | 可选字段 |
+|---------|------|---------|---------|
+| meta | 首事件，声明能力 | capabilities | - |
+| progress | 阶段进度 | stage, message | stepId |
+| tool.call | 工具调用开始 | toolCallId, toolName, argsSummary | - |
+| tool.result | 工具调用结束 | toolCallId, toolName, status | resultSummary, error, evidenceRefs |
+| message.delta | 回答增量 | delta | - |
+| evidence.update | 证据链增量 | mode | evidence, evidenceId |
+| warning | 降级/不确定项 | code, message | details |
+| error | 结构化错误 | code, message, retryable, requestId | details |
+| final | 结束事件 | status | summary |
 
 #### 3.5.2 证据链增量更新（R6.2）
 
@@ -362,6 +514,16 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - 识别出写操作意图时明确告知并提示需要审批
 - 用户没有写操作权限时返回 FORBIDDEN 错误
 - 不确定是否为写操作时按只读处理
+
+补充约束（门禁条件，L4 生效）：
+
+| 门禁 | 检查内容 | 不满足时 |
+|------|---------|---------|
+| **权限** | 用户是否具备执行类权限（例如 `execution:execute:*`） | 返回 `FORBIDDEN` |
+| **审批** | 审批状态是否为 approved（多签按规则收敛） | 返回 `GUARDRAIL_BLOCKED` |
+| **白名单** | 目标资源/动作是否在允许范围（配置化） | 返回 `GUARDRAIL_BLOCKED` |
+| **Kill Switch** | 写操作熔断开关是否关闭 | 返回 `GUARDRAIL_BLOCKED` |
+| **风险评估** | 高风险操作是否满足升级审批链与约束清单 | 返回 `GUARDRAIL_BLOCKED` |
 
 #### 3.6.2 写操作草案生成（R5.2，L4 预留）
 
@@ -571,6 +733,7 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - `GUARDRAIL_BLOCKED`：防护栏拦截
 - `EVIDENCE_MISSING`：证据链缺失
 - `EVIDENCE_MISMATCH`：证据链不匹配
+- `INTERNAL_ERROR`：服务内部错误
 - `SERVICE_UNAVAILABLE`：服务不可用
 
 ### 6.3 错误处理策略
@@ -628,6 +791,17 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 - **真实依赖**：冒烟/集成测试必须使用真实依赖；单元测试允许通过依赖注入传入“具备真实错误行为”的测试实现，但不得用 mock 掩盖真实失败模式。
 
 ## 8. 实施路线图
+
+### 8.0 总体时间规划（参考技术方案）
+
+| 阶段 | 目标 | 工期 | 人力 | 关键里程碑 |
+|------|------|------|------|-----------|
+| Phase 1 | 核心组件落地（L1） | 4-6 周 | 2-3 人 | SSE 流式 + Evidence + 工具装饰器 |
+| Phase 2 | 能力增强（L2） | 6-8 周 | 2-3 人 | RAG + 多模态 + OpenTelemetry |
+| Phase 3 | 受控闭环（L4） | 10-12 周 | 3-4 人 | 草案→审批→执行→回滚 |
+| Phase 4 | 优化与稳定 | 4-6 周 | 2-3 人 | 性能优化 + 压测 + 文档完善 |
+
+**总工期**：24-32 周（6-8 个月）
 
 ### 8.1 Phase 1：全知查询员（L1 / MVP）
 
@@ -753,53 +927,6 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 
 **预计工期**：10-12 周
 
-## 9. 风险与控制
-
-### 9.1 风险矩阵
-
-| 风险点 | 描述 | 影响 | 概率 | 控制措施 |
-|--------|------|------|------|----------|
-| 模型幻觉 | Agent 编造工艺参数或虚假报警 | 高 | 中 | 引入 RAG 机制；强制附带参考来源；关键参数需人工二次核实 |
-| 误操作 | Agent 错误调用写接口导致停产 | 高 | 低 | 只读默认；写操作必须经过草案→审批→受控执行；具备回滚与熔断 |
-| 数据泄露 | 敏感配方泄露 | 高 | 低 | 私有化部署；敏感词过滤；审计日志记录 |
-| 口径不一致 | 同一指标不同部门口径不同 | 中 | 高 | 建立指标口径仓库；版本化管理；强制引用口径版本 |
-| 时间对齐错误 | OT时序与MES事件错配 | 中 | 中 | 引入事件模型与时间对齐策略；在证据链中展示对齐规则 |
-| 算力成本失控 | 私有化大模型推理成本高 | 中 | 中 | Token预算与配额管理；简单查询路由到小模型；高频问题做缓存 |
-| 过度依赖 | 一线员工丧失独立判断能力 | 中 | 中 | 设置培训与考核机制；定期盲测/演练；关键建议强制确认 |
-| 性能瓶颈 | 并发请求导致系统过载 | 中 | 中 | 并发控制；队列管理；降级策略 |
-| 依赖服务不可用 | Postgres/llama.cpp 不可用 | 高 | 低 | 健康检查；降级处理；告警机制 |
-
-## 10. 成功指标
-
-### 10.1 经营侧 KPI
-
-- 吨钢成本：可查询、可追溯、可对比
-- 吨钢能耗：实时监控、异常告警
-- 批次毛利：自动计算、口径统一
-- 订单准交率：实时跟踪
-- 库存周转天数：趋势分析
-
-### 10.2 生产侧 KPI
-
-- 良品率/降级率：实时监控、异常告警
-- 关键工序节拍偏差：自动检测
-- 异常处置时长：缩短 30%
-
-### 10.3 设备侧 KPI
-
-- 非计划停机时长：减少 20%
-- MTTR：缩短 25%
-- MTBF：提升 15%
-- 缺件导致的停机次数：减少 40%
-
-### 10.4 系统侧 KPI
-
-- 查询响应时间：P95 < 10秒
-- 系统可用性：>= 99.9%
-- 审计覆盖率：100%
-- 数值回答准确率：>= 99%
-- 证据链完整率：100%
-
 ## 11. 技术栈
 
 ### 11.1 后端技术栈
@@ -862,8 +989,8 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
    - 生成回答
 4. 过程中逐步输出 SSE 事件：
    - progress：阶段进度
-   - tool_call：工具调用开始
-   - tool_result：工具结果摘要
+   - tool.call：工具调用开始
+   - tool.result：工具结果摘要
    - message.delta：回答流式增量
    - evidence.update：证据链增量更新
 5. 结束输出 final 事件
@@ -995,7 +1122,7 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 | R10.1 | 提示词注入防护 | `4.2.1`；`4.1` | 检测到注入返回结构化错误或拦截；审计记录注入尝试事件（不含敏感原文） |
 | R10.2 | 敏感信息脱敏 | `4.2.2`；`4.4` | 对外输出与证据链默认脱敏；具备权限才可展开；审计日志参数摘要脱敏 |
 | R10.3 | 输出安全校验 | `4.2.3` | 输出包含系统提示词/敏感信息特征时过滤或拒绝；审计记录触发原因摘要 |
-| R11.1 | 审计日志记录 | `2.8.1`；`6.3`；`13.1` | 每次请求均落库审计（覆盖 query/tool_call/response 摘要/error）；审计可按 `requestId` 追溯全链路 |
+| R11.1 | 审计日志记录 | `2.8.1`；`6.3`；`13.1` | 每次请求均落库审计（覆盖 query/tool.call/response 摘要/error）；审计可按 `requestId` 追溯全链路 |
 | R11.2 | 审计日志不可篡改 | `2.8.1` | 审计存储与权限采用 append-only 与访问控制；查询审计日志本身也要被审计（按规范） |
 | R11.3 | 结构化日志 | `2.8.2`；`2.3.1`（requestId 贯穿） | 结构化日志包含 `requestId/sessionId/toolName/status/errorCode`；可通过日志聚合定位失败阶段 |
 | R12.3 | 健康检查 | `3.2.2`（可靠性约束引用） | 健康检查返回依赖状态（Postgres/llama.cpp 等）；不可用时标记 degraded/unhealthy 并触发告警（如配置） |
@@ -1010,16 +1137,3 @@ GangQing（钢擎）是一个钢铁工业全域认知决策系统，旨在解决
 | R16.3 | 数据质量评估前置 | `5.5` | 关键数据读取时记录质量等级；质量低拒绝输出确定性结论并提示原因；审计记录质量评估结果摘要 |
 | R17.2 | 高风险意图识别与拦截 | `3.10`；`4.1`；`4.2` | 越权/敏感查询返回 `FORBIDDEN`；写操作倾向返回 `GUARDRAIL_BLOCKED`；证据链记录规则 ID 与命中原因摘要 |
 | R17.3 | 物理约束与一致性校验 | `3.10`；`5.1.3` | 关键数值越界/变化率异常触发阻断或降级；证据链记录阈值版本；审计记录触发原因 |
-
-## 18. 变更历史
-
-| 版本 | 日期 | 变更内容 | 变更人 |
-|------|------|----------|--------|
-| 1.0 | 2025-01-XX | 初始版本 | - |
-
----
-
-**文档状态**：草稿
-**最后更新**：2025-01-XX
-**审核状态**：待审核
-

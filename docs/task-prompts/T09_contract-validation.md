@@ -20,6 +20,9 @@
 - **RBAC & Audit & requestId 贯穿（强制）**:
   - 任何一次校验失败都必须写审计（含 `requestId`、`toolName`、阶段/stepId（如有））。
   - `details` 禁止包含敏感信息（包括密钥、原始 SQL、完整行数据等）。
+- **配置外部化（强制）**:
+  - 校验开关、严格模式、错误采样率、最大 errors 数、是否允许降级等必须配置化（环境变量或配置文件），禁止硬编码。
+  - 配置缺失必须快速失败，并输出清晰英文错误（不得交互式询问）。
 - **真实集成测试（No Skip）**:
   - 冒烟/集成测试必须连接真实服务（真实 FastAPI + 真实 Postgres + 真实 llama.cpp）。
   - 缺配置/依赖不可用 => 测试必须失败并输出清晰英文错误。
@@ -29,6 +32,7 @@
 - TDD: docs/design.md（6 错误处理 / 7 测试策略 / 3.5 SSE 错误事件规则）
 - tasks: docs/tasks.md（任务 9）
 - contracts: docs/contracts/api-and-events-draft.md
+- security: docs/security/error-details-redaction.md
 - api docs: docs/api/openapi.yaml
 
 # Execution Plan (执行蓝图)
@@ -37,6 +41,10 @@
 - Goal:
   - 建立工具调用的统一参数校验入口，所有工具参数必须通过 Pydantic 校验。
   - 校验失败可稳定映射为 `VALIDATION_ERROR`，并输出结构化错误模型（含 `requestId`）。
+- Key Decisions:
+  - 校验边界：**工具调用边界**必须校验（而不是工具函数内部“自觉”校验）。
+  - 错误归一：无论来自 Pydantic v2 的 `ValidationError` 还是业务手写校验，最终对外必须落到同一 `ErrorResponse`/SSE `error` 载荷。
+  - 脱敏策略：对外与审计 `details` 仅允许字段级摘要（path/reason/type），禁止原始输入全文。
 - Deliverables:
   - 工具参数 Pydantic 模型清单与落点文件规划。
   - 统一异常捕获与错误映射规则（VALIDATION_ERROR）。
@@ -46,6 +54,12 @@
 - Goal:
   - 在“即将对外输出”（REST 响应 / SSE event payload）之前执行 Pydantic schema 断言。
   - 校验失败稳定映射为 `CONTRACT_VIOLATION`，并确保 SSE `error` 事件与 REST 错误响应同构。
+- Key Decisions:
+  - 校验边界：所有对外输出必须走统一的“输出封装器”（REST response builder / SSE emitter），由该封装器强制执行 `model_validate` / `model_dump`。
+  - 失败策略：
+    - 对 REST：直接返回结构化错误响应。
+    - 对 SSE：先输出 `error` 事件（同构 ErrorResponse），再输出 `final` 事件并终止流（不可恢复错误）。
+  - 证据链一致性：若输出对象包含 evidence 引用，契约校验应覆盖 evidence id/shape，避免前端 Context Panel 解析失败。
 - Deliverables:
   - 工具输出 Pydantic 模型（Result Models）规划。
   - SSE error 事件载荷与 REST ErrorResponse 的字段对齐策略。
@@ -55,16 +69,21 @@
 - Goal:
   - 建立“契约漂移不可发布”的测试门禁：最少包含单元测试 + 真实服务冒烟测试。
   - 覆盖两类失败：入参校验失败（VALIDATION_ERROR）与输出校验失败（CONTRACT_VIOLATION）。
+- Key Decisions:
+  - 单元测试重点：错误映射稳定性、结构化错误字段齐全、`message` 英文、`details` 脱敏。
+  - 冒烟测试重点：真实服务连通性 + SSE/REST 对外行为一致性（字段同构、SSE 事件顺序合理）。
 - Deliverables:
   - 单元测试集合（覆盖异常映射与错误结构）。
   - 冒烟脚本：连接真实服务并触发一次失败路径，断言结构化错误。
 
 # Deliverables Definition (交付物定义)
 - [ ] **Directory Structure**: 明确新增/修改的目录树与文件清单。
+- [ ] **Environment Variables**: 明确新增/使用的环境变量与校验规则（例如严格模式开关、校验级别、错误采样率等；缺失必须 fast-fail）。
 - [ ] **API Contracts**: 明确对外错误模型与 SSE error 事件字段（与 `docs/contracts/api-and-events-draft.md` 对齐）。
 - [ ] **Tool Contracts**: 每个工具的 Params/Result Pydantic 模型清单与落点。
 - [ ] **Error Model**: `VALIDATION_ERROR`/`CONTRACT_VIOLATION` 的触发条件与 `details` 脱敏规则。
 - [ ] **Audit**: 审计事件类型与最小字段集（requestId、toolName、result、errorCode）。
+- [ ] **Observability**: requestId 贯穿（HTTP 入站 → 工具校验 → 输出校验 → SSE/REST 响应），并在日志中包含 toolName/stepId（如有）。
 - [ ] **Test Gate**: 单元测试与冒烟测试的覆盖点与断言目标。
 
 # Verification Plan (整体验收)
@@ -75,6 +94,10 @@
 # Output Requirement
 请输出一份详细的 Markdown 执行计划，包含上述所有章节。
 **不要写代码**。
+要求：
+- 必须给出“统一错误模型 + SSE error 载荷 + REST 错误响应”的字段级对齐说明。
+- 必须给出“校验发生在什么边界、由谁负责”的责任划分（避免工具内部各自为政）。
+- 必须明确 `details` 的允许字段形状（以及明确禁止项）。
 ```
 
 ---
@@ -100,27 +123,42 @@
 - TDD: docs/design.md（6.1 统一错误模型 / 7 测试策略）
 - tasks: docs/tasks.md（9.1）
 - contracts: docs/contracts/api-and-events-draft.md（ErrorResponse）
+- security: docs/security/error-details-redaction.md
 
 # Target Files (建议落点；以仓库现状为准)
 - backend/gangqing/common/errors.py（复用/扩展错误模型，确保 requestId 字段对齐）
 - backend/gangqing/tools/base.py（工具协议边界，参数类型约束）
 - backend/gangqing/tools/*（各工具 params 模型落地与调用入口）
 - backend/gangqing/common/audit.py（写审计：tool call/validation failure）
+- backend/gangqing/schemas/*（若已有对外 schema 目录：将 ErrorResponse/Evidence 等对外模型集中维护）
 - backend/tests/**（单元测试）
+- backend/scripts/contract_validation_smoke_test.py（真实服务冒烟）
+
+# Environment Variables (如需新增，必须同步补齐 .env.example)
+- `GANGQING_CONTRACT_VALIDATION_STRICT`：是否启用严格校验（例如 strict=true 时校验失败必须阻断输出）。
+- `GANGQING_CONTRACT_VALIDATION_MAX_ERRORS`：details 中最大错误条目数上限（防止过大返回与敏感泄漏）。
 
 # Execution Plan (具体步骤)
 1) 建立统一参数校验入口
 - 目标：所有工具调用前执行 `PydanticModel.model_validate(...)`（或等价校验）。
 - 失败：捕获 Pydantic 校验异常，组装 `VALIDATION_ERROR`（英文 message），并携带 `requestId`。
 
-2) 细化 `details` 脱敏策略
+2) 明确错误模型字段与 details 形状（字段级约束）
+- 必填字段：`code`、`message`（英文）、`requestId`、`retryable`
+- `details` 仅允许包含字段级摘要：
+  - `field_errors[]`: `path`（字符串或数组）、`reason`（英文短语）、`error_type`（字符串）
+  - `stage`: 例如 `tool.params.validate`
+  - `tool_name`: 工具名（若已知）
+- 禁止：原始输入全文、密钥/token、原始 SQL、完整 rows/大对象、堆栈详情（stack trace 仅允许写入服务端日志，不对外返回）。
+
+3) 细化 `details` 脱敏策略
 - 目标：`details` 仅包含字段级摘要，例如 `{"fieldErrors": [{"path": "...", "reason": "..."}]}`。
 - 禁止：原始输入全文、密钥、token、完整 SQL、完整 rows。
 
-3) 审计记录
+4) 审计记录
 - 目标：校验失败必须写审计事件，至少包含 `toolName` 与 `errorCode=VALIDATION_ERROR`。
 
-4) 测试
+5) 测试
 - 单元测试：覆盖
   - 非法参数 -> `VALIDATION_ERROR`
   - message 为英文（可用简单正则/关键词断言）
@@ -130,6 +168,12 @@
 # Verification
 - Unit: `pytest -q`
 - Smoke: `backend/scripts/contract_validation_smoke_test.py`
+
+# Manual Verification (仅用于开发调试；自动化断言仍以测试为准)
+- 启动后端服务后，发起一次“工具调用参数非法”的请求（REST 或 SSE 入口均可），确认返回/事件包含：
+  - `code=VALIDATION_ERROR`
+  - `requestId` 非空
+  - `details` 不包含敏感字段
 
 # Output Requirement
 - 输出所有修改或创建的文件路径清单。

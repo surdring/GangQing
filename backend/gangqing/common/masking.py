@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from gangqing.common.settings import load_settings
+from gangqing_db.evidence import Evidence
 
 
 class MaskingPolicy(BaseModel):
@@ -71,19 +72,6 @@ def build_default_masking_policy() -> MaskingPolicy:
         default_action=settings.masking_default_action,
         sensitiveKeyFragments=_DEFAULT_SENSITIVE_KEY_FRAGMENTS,
         domains=_DEFAULT_DOMAINS,
-        roleAllowFragments={
-            "finance": (
-                "unit_cost",
-                "total_cost",
-                "cost",
-                "profit",
-                "price",
-                "supplier_price",
-            ),
-        },
-        roleAllowDomains={
-            "finance": ("Finance",),
-        },
     )
 
 
@@ -171,8 +159,12 @@ def apply_role_based_masking(
     value: Any,
     *,
     role: str | None,
+    can_unmask: bool = False,
     policy: MaskingPolicy | None = None,
 ) -> tuple[Any, dict[str, Any] | None]:
+    if can_unmask:
+        return value, None
+
     effective_policy = policy or build_default_masking_policy()
     role_key = (role or "").strip().lower()
     compiled = _compile_policy(effective_policy, role_key=role_key)
@@ -240,3 +232,25 @@ def apply_role_based_masking(
         "version": effective_policy.version,
         "maskedKeys": sorted(masked_keys),
     }
+
+
+def apply_evidence_role_based_masking(
+    evidence: Evidence,
+    *,
+    role: str | None,
+    can_unmask: bool = False,
+    policy: MaskingPolicy | None = None,
+) -> Evidence:
+    masked_locator, masking_meta = apply_role_based_masking(
+        evidence.source_locator,
+        role=role,
+        can_unmask=can_unmask,
+        policy=policy,
+    )
+
+    if masking_meta is None:
+        return evidence
+
+    redactions: dict[str, Any] = {} if evidence.redactions is None else dict(evidence.redactions)
+    redactions.setdefault("masking", masking_meta)
+    return evidence.model_copy(update={"source_locator": masked_locator, "redactions": redactions})

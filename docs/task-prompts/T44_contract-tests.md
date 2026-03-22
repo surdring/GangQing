@@ -26,7 +26,9 @@
 
 # Verification
 - Unit: `pytest -q && npm -C web test`
-- Smoke: `backend/scripts/contract_tests_smoke_test.py`
+- Smoke:
+  - `backend/scripts/contract_tests_smoke_test.py`
+  - `backend/scripts/sse_smoke_test.py`
 
 # 联调检查清单（契约/联调门禁）
 - [ ] `docs/contracts/api-and-events-draft.md` 是否被视为对外契约的单一事实源（任何实现/测试以它为准）？
@@ -36,6 +38,8 @@
   - [ ] Evidence（claims/citations/lineage/tool traces 的字段完整性）
   - [ ] ErrorResponse（`code/message(英文)/details?/retryable/requestId`）
 - [ ] SSE 事件类型枚举是否与契约一致（不多不少），至少包含：`progress/tool.call/tool.result/message.delta/evidence.update/warning/error/final`？
+- [ ] SSE 事件类型判定是否以 JSON 字段 `type` 为准（不依赖 SSE 的 `event:` 行）？
+- [ ] `final.payload` 是否仅包含 `status: success|error|cancelled`（禁止输出 `done` 等冗余字段）？
 - [ ] `message.delta` 是否允许多次出现，且每次为增量片段（契约/测试需覆盖“多 delta”场景）？
 - [ ] `evidence.update` 是否允许多次出现，且为增量合并语义（契约/测试需覆盖“多 update”场景）？
 - [ ] 契约失败时是否统一映射为 `CONTRACT_VIOLATION`，并在 `details` 中给出字段路径/原因摘要（禁止敏感信息）？

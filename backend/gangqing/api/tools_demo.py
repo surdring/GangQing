@@ -27,11 +27,13 @@ def run_demo_tool(
     ctx: RequestContext = Depends(require_authed_request_context),
     _: RequestContext = Depends(require_capability("tool:demo:run")),
 ) -> DemoToolResponse:
-    require_tool_capability(ctx=ctx, capability="tool:demo:run")
+    require_tool_capability(ctx=ctx, capability="tool:demo:run", tool_name="demo_tool")
 
     write_tool_call_event(
         ctx=ctx,
         tool_name="demo_tool",
+        tool_call_id=None,
+        duration_ms=None,
         args_summary={"query": payload.query},
         result_status="success",
         error_code=None,

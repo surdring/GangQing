@@ -12,6 +12,8 @@ from gangqing.common.errors import AppError, ErrorCode
 
 
 class Role(str, Enum):
+    ADMIN = "admin"
+    AUDITOR = "auditor"
     PLANT_MANAGER = "plant_manager"
     DISPATCHER = "dispatcher"
     MAINTAINER = "maintainer"
@@ -19,22 +21,45 @@ class Role(str, Enum):
 
 
 _ROLE_TO_CAPABILITIES: dict[Role, set[str]] = {
-    Role.PLANT_MANAGER: {
+    Role.ADMIN: {
         "chat:conversation:stream",
         "audit:event:read",
+        "evidence:chain:read",
         "finance:report:read",
         "tool:demo:run",
         "tool:postgres:read",
+        "metric:lineage:read",
+        "semantic:mapping:read",
+        "semantic:mapping:write",
+        "semantic:mapping:conflict:read",
+    },
+    Role.AUDITOR: {
+        "audit:event:read",
+        "semantic:mapping:read",
+        "semantic:mapping:conflict:read",
+    },
+    Role.PLANT_MANAGER: {
+        "chat:conversation:stream",
+        "evidence:chain:read",
+        "finance:report:read",
+        "tool:demo:run",
+        "tool:postgres:read",
+        "metric:lineage:read",
+        "semantic:mapping:read",
     },
     Role.DISPATCHER: {
         "chat:conversation:stream",
+        "semantic:mapping:read",
     },
     Role.MAINTAINER: {
         "chat:conversation:stream",
+        "semantic:mapping:read",
     },
     Role.FINANCE: {
-        "audit:event:read",
+        "evidence:chain:read",
+        "data:unmask:read",
         "finance:report:read",
+        "semantic:mapping:read",
     },
 }
 
@@ -83,6 +108,19 @@ def assert_has_capability(*, ctx: RequestContext, role_raw: str, capability: str
             details={"capability": capability, "role": role.value},
             retryable=False,
         )
+
+
+def has_capability(*, role_raw: str, capability: str) -> bool:
+    if not _is_valid_capability_name(capability):
+        return False
+    if not role_raw:
+        return False
+    try:
+        role = Role(role_raw)
+    except Exception:
+        return False
+    caps = _ROLE_TO_CAPABILITIES.get(role, set())
+    return capability in caps
 
 
 def require_capability(capability: str):

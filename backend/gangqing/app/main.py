@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from starlette.middleware.cors import CORSMiddleware
 import structlog
 from structlog.contextvars import bind_contextvars, clear_contextvars
 
@@ -55,11 +56,26 @@ def _build_audit_ctx_from_request_state(request: Request) -> RequestContext:
     )
 
 
+def _has_isolation_scope(request: Request) -> bool:
+    return True
+
+
 def create_app() -> FastAPI:
     settings = load_settings()
     configure_logging(log_level=settings.log_level, log_format=settings.log_format)
 
     app = FastAPI(title="GangQing API")
+
+    allowed_origins = [o for o in (settings.cors_allow_origins or "").split(",") if o.strip()]
+    if allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[o.strip() for o in allowed_origins],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["X-Request-Id"],
+        )
 
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next):
@@ -101,21 +117,24 @@ def create_app() -> FastAPI:
             raise
         finally:
             if response is not None:
-                ctx = _build_audit_ctx_from_request_state(request)
-                error_code = getattr(request.state, "error_code", None)
-                write_audit_event(
-                    ctx=ctx,
-                    event_type=AuditEventType.API_RESPONSE.value,
-                    resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
-                    action_summary={
-                        "method": request.method,
-                        "path": request.url.path,
-                        "statusCode": getattr(response, "status_code", None),
-                        "durationMs": round((time.perf_counter() - started) * 1000.0, 3),
-                    },
-                    result_status="success" if int(getattr(response, "status_code", 500) or 500) < 400 else "failure",
-                    error_code=str(error_code) if error_code else None,
-                )
+                if _has_isolation_scope(request):
+                    ctx = _build_audit_ctx_from_request_state(request)
+                    error_code = getattr(request.state, "error_code", None)
+                    write_audit_event(
+                        ctx=ctx,
+                        event_type=AuditEventType.API_RESPONSE.value,
+                        resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
+                        action_summary={
+                            "method": request.method,
+                            "path": request.url.path,
+                            "statusCode": getattr(response, "status_code", None),
+                            "durationMs": round((time.perf_counter() - started) * 1000.0, 3),
+                        },
+                        result_status="success"
+                        if int(getattr(response, "status_code", 500) or 500) < 400
+                        else "failure",
+                        error_code=str(error_code) if error_code else None,
+                    )
 
             METRICS.observe_http_request(
                 method=request.method,
@@ -127,8 +146,8 @@ def create_app() -> FastAPI:
                 "http_request",
                 method=request.method,
                 path=request.url.path,
-                status_code=getattr(response, "status_code", None),
-                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                statusCode=getattr(response, "status_code", None),
+                latencyMs=round((time.perf_counter() - started) * 1000.0, 3),
                 error=err.__class__.__name__ if err is not None else None,
             )
             clear_contextvars()
@@ -142,33 +161,34 @@ def create_app() -> FastAPI:
     @app.exception_handler(AppError)
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         request.state.error_code = exc.code.value
-        ctx = _build_audit_ctx_from_request_state(request)
-        if exc.code == ErrorCode.AUTH_ERROR:
+        if _has_isolation_scope(request):
+            ctx = _build_audit_ctx_from_request_state(request)
+            if exc.code == ErrorCode.AUTH_ERROR:
+                write_audit_event(
+                    ctx=ctx,
+                    event_type=AuditEventType.AUTH_DENIED.value,
+                    resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
+                    action_summary={
+                        "method": request.method,
+                        "path": request.url.path,
+                        "details": exc.details,
+                    },
+                    result_status="failure",
+                    error_code=exc.code.value,
+                )
+
             write_audit_event(
                 ctx=ctx,
-                event_type=AuditEventType.AUTH_DENIED.value,
+                event_type=AuditEventType.API_RESPONSE.value,
                 resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
                 action_summary={
                     "method": request.method,
                     "path": request.url.path,
-                    "details": exc.details,
+                    "statusCode": _map_status_code(exc.code),
                 },
                 result_status="failure",
                 error_code=exc.code.value,
             )
-
-        write_audit_event(
-            ctx=ctx,
-            event_type=AuditEventType.API_RESPONSE.value,
-            resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
-            action_summary={
-                "method": request.method,
-                "path": request.url.path,
-                "statusCode": _map_status_code(exc.code),
-            },
-            result_status="failure",
-            error_code=exc.code.value,
-        )
         resp_obj = exc.to_response()
         resp = resp_obj.model_dump(by_alias=True)
         return JSONResponse(
@@ -183,24 +203,36 @@ def create_app() -> FastAPI:
     ) -> JSONResponse:
         request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
         request.state.error_code = ErrorCode.VALIDATION_ERROR.value
-        ctx = _build_audit_ctx_from_request_state(request)
-        write_audit_event(
-            ctx=ctx,
-            event_type=AuditEventType.API_RESPONSE.value,
-            resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
-            action_summary={
-                "method": request.method,
-                "path": request.url.path,
-                "statusCode": 422,
-            },
-            result_status="failure",
-            error_code=ErrorCode.VALIDATION_ERROR.value,
-        )
+        if _has_isolation_scope(request):
+            ctx = _build_audit_ctx_from_request_state(request)
+            write_audit_event(
+                ctx=ctx,
+                event_type=AuditEventType.API_RESPONSE.value,
+                resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
+                action_summary={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "statusCode": 422,
+                },
+                result_status="failure",
+                error_code=ErrorCode.VALIDATION_ERROR.value,
+            )
+
+        field_errors: list[dict[str, str]] = []
+        for item in exc.errors():
+            loc = item.get("loc")
+            if isinstance(loc, (list, tuple)):
+                path = ".".join([str(x) for x in loc])
+            else:
+                path = str(loc) if loc is not None else ""
+            reason = str(item.get("msg") or "Invalid value")
+            field_errors.append({"path": path or "__root__", "reason": reason})
+
         err = ErrorResponse(
             code=ErrorCode.VALIDATION_ERROR.value,
             message="Validation error",
             details={
-                "errors": exc.errors(),
+                "fieldErrors": field_errors,
             },
             retryable=False,
             request_id=request_id,
@@ -216,19 +248,20 @@ def create_app() -> FastAPI:
         logger.exception("Unhandled exception", exc_info=exc)
         request_id = getattr(request.state, "request_id", uuid.uuid4().hex)
         request.state.error_code = ErrorCode.INTERNAL_ERROR.value
-        ctx = _build_audit_ctx_from_request_state(request)
-        write_audit_event(
-            ctx=ctx,
-            event_type=AuditEventType.API_RESPONSE.value,
-            resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
-            action_summary={
-                "method": request.method,
-                "path": request.url.path,
-                "statusCode": 500,
-            },
-            result_status="failure",
-            error_code=ErrorCode.INTERNAL_ERROR.value,
-        )
+        if _has_isolation_scope(request):
+            ctx = _build_audit_ctx_from_request_state(request)
+            write_audit_event(
+                ctx=ctx,
+                event_type=AuditEventType.API_RESPONSE.value,
+                resource=str(getattr(getattr(request, "url", None), "path", None) or "http"),
+                action_summary={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "statusCode": 500,
+                },
+                result_status="failure",
+                error_code=ErrorCode.INTERNAL_ERROR.value,
+            )
         err = ErrorResponse(
             code=ErrorCode.INTERNAL_ERROR.value,
             message="Internal error",
@@ -247,3 +280,6 @@ def create_app() -> FastAPI:
 
 def _map_status_code(code: ErrorCode) -> int:
     return ERROR_CODE_TO_STATUS.get(code, 500)
+
+
+app = create_app()

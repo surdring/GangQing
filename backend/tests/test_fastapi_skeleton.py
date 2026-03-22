@@ -5,6 +5,7 @@ import json
 import socket
 import threading
 import time
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,7 +14,8 @@ from gangqing.app.main import create_app
 from gangqing.common.auth import create_access_token
 from gangqing.api.chat import _build_error_payload
 from gangqing.common.context import RequestContext
-from gangqing.common.errors import AppError, ErrorCode
+from gangqing.common.errors import AppError, ErrorCode, ErrorResponse
+from gangqing.schemas.sse import SseErrorEvent, SseMetaEvent, build_error_envelope
 
 
 def test_sse_error_payload_contains_request_id() -> None:
@@ -29,6 +31,22 @@ def test_sse_error_payload_contains_request_id() -> None:
     )
     assert sorted(payload.keys()) == ["code", "details", "message", "requestId", "retryable"]
     assert payload["requestId"] == "rid_sse_err"
+
+    env = build_error_envelope(
+        ctx=RequestContext(requestId="rid_sse_err", tenantId="t1", projectId="p1"),
+        sequence=1,
+        timestamp=datetime.now(timezone.utc),
+        payload=ErrorResponse.model_validate(payload),
+    )
+    dumped = env.model_dump(by_alias=True, mode="json")
+    assert dumped["type"] == "error"
+    assert dumped["requestId"] == "rid_sse_err"
+    assert sorted(dumped["payload"].keys()) == ["code", "details", "message", "requestId", "retryable"]
+    assert dumped["payload"]["requestId"] == "rid_sse_err"
+
+    validated = SseErrorEvent.model_validate(dumped)
+    assert validated.request_id == "rid_sse_err"
+    assert validated.payload.request_id == "rid_sse_err"
 
 
 def _require_env(name: str) -> str:
@@ -226,7 +244,7 @@ def test_llamacpp_timeout_dependency_details_are_structured() -> None:
 
         dep = probe_llama_cpp(load_healthcheck_settings())
         assert dep.name.value == "llama_cpp"
-        assert dep.status.value == "unavailable"
+        assert dep.status.value == "degraded"
         assert dep.details is not None
         assert dep.details.reason == "timeout"
         assert dep.details.error_class
@@ -234,6 +252,33 @@ def test_llamacpp_timeout_dependency_details_are_structured() -> None:
     finally:
         stop_event.set()
         thread.join(timeout=1.0)
+
+
+def test_postgres_unreachable_marks_unhealthy() -> None:
+    app = create_app()
+    client = TestClient(app)
+
+    original_db = os.environ.get("GANGQING_DATABASE_URL")
+    try:
+        os.environ["GANGQING_DATABASE_URL"] = "postgresql+psycopg://user:password@127.0.0.1:1/gangqing"
+        os.environ["GANGQING_HEALTHCHECK_POSTGRES_CONNECT_TIMEOUT_SECONDS"] = "0.2"
+
+        resp = client.get(
+            "/api/v1/health",
+            headers={"X-Tenant-Id": "t1", "X-Project-Id": "p1", "X-Request-Id": "rid_h_pg_down"},
+        )
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "unhealthy"
+        deps = _deps_by_name(body["dependencies"])
+        assert deps["postgres"]["status"] == "unavailable"
+
+        _assert_no_sensitive_leak(json.dumps(body, ensure_ascii=False))
+    finally:
+        if original_db is None:
+            os.environ.pop("GANGQING_DATABASE_URL", None)
+        else:
+            os.environ["GANGQING_DATABASE_URL"] = original_db
 
 
 def test_provider_timeout_dependency_details_are_structured() -> None:
@@ -247,7 +292,7 @@ def test_provider_timeout_dependency_details_are_structured() -> None:
 
         dep = probe_provider(load_healthcheck_settings())
         assert dep.name.value == "provider"
-        assert dep.status.value == "unavailable"
+        assert dep.status.value == "degraded"
         assert dep.details is not None
         assert dep.details.reason == "timeout"
         assert dep.details.error_class
@@ -332,6 +377,8 @@ def test_structured_log_contains_request_id(capfd) -> None:
     assert any(obj.get("requestId") == "rid_log_1" for obj in http_events)
     assert any(obj.get("tenantId") == "t1" for obj in http_events)
     assert any(obj.get("projectId") == "p1" for obj in http_events)
+    assert any("statusCode" in obj for obj in http_events)
+    assert any("latencyMs" in obj for obj in http_events)
 
 
 def test_sse_stream_event_sequence_and_request_id() -> None:
@@ -366,7 +413,10 @@ def test_sse_stream_event_sequence_and_request_id() -> None:
 
     assert events
     assert events[0]["type"] == "meta"
+    SseMetaEvent.model_validate(events[0])
     assert events[0]["requestId"] == "rid_sse_1"
+    assert events[0]["tenantId"] == "t1"
+    assert events[0]["projectId"] == "p1"
     assert events[-1]["type"] == "final"
 
 

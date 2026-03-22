@@ -231,10 +231,13 @@ def test_get_metric_lineage_by_version_success() -> None:
         metric_name="oee",
         lineageVersion="1.0.0",
     )
-    record = get_metric_lineage(query, ctx=_ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"}))
+    record = get_metric_lineage(query, ctx=_ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"}))
     assert record.metric_name == "oee"
     assert record.lineage_version == "1.0.0"
     assert record.status == "active"
+
+    dumped = record.model_dump(by_alias=True)
+    assert dumped.get("lineageVersion") == "1.0.0"
 
 
 def test_get_metric_lineage_missing_returns_evidence_missing() -> None:
@@ -244,7 +247,7 @@ def test_get_metric_lineage_missing_returns_evidence_missing() -> None:
     )
 
     with pytest.raises(EvidenceMissingError) as exc_info:
-        get_metric_lineage(query, ctx=_ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"}))
+        get_metric_lineage(query, ctx=_ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"}))
 
     err = exc_info.value
     assert err.code.value == ErrorCode.EVIDENCE_MISSING.value
@@ -257,8 +260,9 @@ def test_get_metric_lineage_missing_returns_evidence_missing() -> None:
     assert dumped.get("requestId") is not None
 
 
+
 def test_bind_user_specified_success() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     record, decision, evidence = bind_metric_lineage_for_computation(
         MetricLineageBindingRequest(
             metric_name="oee",
@@ -273,6 +277,16 @@ def test_bind_user_specified_success() -> None:
     assert evidence.lineage_version == "1.0.0"
 
 
+def test_metric_lineage_query_invalid_semver_rejected() -> None:
+    with pytest.raises(ValueError):
+        MetricLineageQuery(metric_name="oee", lineageVersion="v1")
+
+
+def test_metric_lineage_binding_request_invalid_semver_rejected() -> None:
+    with pytest.raises(ValueError):
+        MetricLineageBindingRequest(metric_name="oee", lineageVersion="1.0")
+
+
 def test_bind_scenario_mapping_success() -> None:
     _insert_scenario_mapping(
         tenant_id="t_metric",
@@ -284,7 +298,7 @@ def test_bind_scenario_mapping_success() -> None:
         is_active=True,
         owner="test",
     )
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     record, _, evidence = bind_metric_lineage_for_computation(
         MetricLineageBindingRequest(
             metric_name="oee",
@@ -300,7 +314,7 @@ def test_bind_scenario_mapping_success() -> None:
 
 
 def test_bind_default_active_success() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     record, decision, evidence = bind_metric_lineage_for_computation(
         MetricLineageBindingRequest(
             metric_name="oee",
@@ -326,7 +340,7 @@ def test_bind_reject_inactive_when_not_allowed() -> None:
         is_active=False,
         owner="test",
     )
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     with pytest.raises(EvidenceMismatchError) as exc_info:
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -355,7 +369,7 @@ def test_bind_reject_deprecated_when_not_allowed() -> None:
         is_active=True,
         owner="test",
     )
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     with pytest.raises(EvidenceMismatchError) as exc_info:
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -374,7 +388,7 @@ def test_bind_reject_deprecated_when_not_allowed() -> None:
 
 
 def test_bind_reject_missing_version_when_default_not_allowed() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     with pytest.raises(EvidenceMismatchError) as exc_info:
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -393,7 +407,7 @@ def test_bind_reject_missing_version_when_default_not_allowed() -> None:
 
 
 def test_bind_cross_scope_access_rejected() -> None:
-    ctx = _ctx(tenant_id="t_other", project_id="p_other", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_other", project_id="p_other", capabilities={"metric:lineage:read"})
     with pytest.raises(AuthError) as exc_info:
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -412,7 +426,7 @@ def test_bind_cross_scope_access_rejected() -> None:
 
 
 def test_bind_partial_scope_params_rejected() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     with pytest.raises(AuthError) as exc_info:
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -432,7 +446,7 @@ def test_bind_partial_scope_params_rejected() -> None:
 
 
 def test_evidence_fields_integrity() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     _, _, evidence = bind_metric_lineage_for_computation(
         MetricLineageBindingRequest(
             metric_name="oee",
@@ -450,7 +464,7 @@ def test_evidence_fields_integrity() -> None:
 
 
 def test_bind_audit_event_written_on_success() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     bind_metric_lineage_for_computation(
         MetricLineageBindingRequest(
             metric_name="oee",
@@ -471,7 +485,7 @@ def test_bind_audit_event_written_on_success() -> None:
 
 
 def test_bind_audit_event_written_on_failure() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     with pytest.raises(EvidenceMismatchError):
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -490,7 +504,7 @@ def test_bind_audit_event_written_on_failure() -> None:
 
 
 def test_scenario_mapping_missing_is_evidence_missing() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     with pytest.raises(EvidenceMissingError) as exc_info:
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -507,7 +521,7 @@ def test_scenario_mapping_missing_is_evidence_missing() -> None:
 
 
 def test_bind_time_range_uses_data_time_range_when_provided() -> None:
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     end = datetime(2026, 1, 2, tzinfo=timezone.utc)
     _, _, evidence = bind_metric_lineage_for_computation(
@@ -677,7 +691,7 @@ def test_default_active_no_active_versions_is_evidence_missing() -> None:
         is_active=False,
         owner="test",
     )
-    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric_lineage:read"})
+    ctx = _ctx(tenant_id="t_metric", project_id="p_metric", capabilities={"metric:lineage:read"})
     with pytest.raises(EvidenceMissingError) as exc_info:
         bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(

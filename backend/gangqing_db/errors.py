@@ -402,10 +402,18 @@ def map_db_error(exc: Exception, *, request_id: str | None = None) -> MigrationE
         return exc
 
     if isinstance(exc, TimeoutError):
-        return UpstreamTimeoutError("Postgres", cause=str(exc), request_id=request_id)
+        return UpstreamTimeoutError("Postgres", cause="timeout", request_id=request_id)
 
     if isinstance(exc, OperationalError):
-        return UpstreamUnavailableError("Postgres", cause=str(exc), request_id=request_id)
+        orig = getattr(exc, "orig", None)
+        pgcode = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+        if str(pgcode or "").strip() == "57014":
+            return UpstreamTimeoutError(
+                "Postgres",
+                cause="query_canceled",
+                request_id=request_id,
+            )
+        return UpstreamUnavailableError("Postgres", cause="operational_error", request_id=request_id)
 
     if isinstance(exc, IntegrityError):
         orig = getattr(exc, "orig", None)
@@ -441,14 +449,17 @@ def map_db_error(exc: Exception, *, request_id: str | None = None) -> MigrationE
 
     if isinstance(exc, DBAPIError):
         orig = getattr(exc, "orig", None)
-        pgcode = getattr(orig, "pgcode", None)
-        cause = str(exc)
-        if len(cause) > 500:
-            cause = cause[:500] + "..."
+        pgcode = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+
+        if str(pgcode or "").strip() == "57014":
+            return UpstreamTimeoutError(
+                "Postgres",
+                cause="query_canceled",
+                request_id=request_id,
+            )
         details: dict[str, Any] = {
             "exception": exc.__class__.__name__,
             "pgcode": pgcode,
-            "cause": cause,
         }
         return MigrationError(
             code=ErrorCode.INTERNAL_ERROR,

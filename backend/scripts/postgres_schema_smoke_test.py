@@ -19,6 +19,7 @@ Configuration missing or connection failure must cause explicit error.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 import sys
 import json
@@ -42,7 +43,7 @@ from gangqing_db.errors import (
 from gangqing_db.settings import load_settings
 
 VERSION_TABLE = "gangqing_alembic_version"
-EXPECTED_HEAD = "0003_ml_scn_map"
+EXPECTED_HEAD = "0004_fact_enums"
 
 # =============================================================================
 # Expected schema objects
@@ -103,6 +104,8 @@ EXPECTED_CHECK_CONSTRAINTS = {
     ("fact_cost_daily", "ck_fact_cost_daily_amount_nonneg"),
     ("fact_cost_daily", "ck_fact_cost_daily_time_range"),
     ("fact_maintenance_workorder", "ck_fact_maintenance_workorder_closed_after_created"),
+    ("fact_alarm_event", "ck_fact_alarm_event_severity_enum"),
+    ("fact_maintenance_workorder", "ck_fact_maintenance_workorder_status_enum"),
 }
 
 EXPECTED_INDEXES = {
@@ -564,6 +567,7 @@ def _assert_schema_objects(database_url: str) -> None:
 
 def main() -> int:
     try:
+        request_id = f"schema-smoke-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         database_url = _require_database_url()
         cfg = _build_alembic_config()
         engine = create_engine(database_url, pool_pre_ping=True)
@@ -573,7 +577,7 @@ def main() -> int:
             with engine.connect():
                 pass
         except Exception as e:
-            raise map_db_error(e)
+            raise map_db_error(e, request_id=request_id)
 
         # upgrade -> downgrade -> upgrade
         command.upgrade(cfg, "head")
@@ -583,6 +587,7 @@ def main() -> int:
                 "upgrade",
                 version=version,
                 cause=f"Expected version {EXPECTED_HEAD}, got {version}",
+                request_id=request_id,
             )
         _assert_schema_objects(database_url)
 
@@ -593,6 +598,7 @@ def main() -> int:
                 "downgrade",
                 version=version,
                 cause=f"Expected no version (base), got {version}",
+                request_id=request_id,
             )
 
         command.upgrade(cfg, "head")
@@ -602,6 +608,7 @@ def main() -> int:
                 "upgrade",
                 version=version,
                 cause=f"Expected version {EXPECTED_HEAD}, got {version}",
+                request_id=request_id,
             )
         _assert_schema_objects(database_url)
 
@@ -639,7 +646,7 @@ def main() -> int:
         return 1
 
     except Exception as e:
-        mapped = map_db_error(e)
+        mapped = map_db_error(e, request_id=request_id if 'request_id' in locals() else None)
         error_response = mapped.to_response()
         details = (
             f" details={json.dumps(error_response.details, ensure_ascii=False, sort_keys=True)}"

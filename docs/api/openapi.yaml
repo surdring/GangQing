@@ -403,12 +403,12 @@
       }
     },
     "/api/v1/chat/stream": {
-      "get": {
+      "post": {
         "tags": [
           "chat"
         ],
         "summary": "Chat Stream (SSE)",
-        "description": "Server-Sent Events (SSE) streaming endpoint for chat.\n\nContract (authoritative):\n  - docs/contracts/api-and-events-draft.md#6.1\n\nEvent encoding rules:\n  - Content-Type: text/event-stream\n  - Each SSE message MUST contain a single-line JSON in data: ...\n  - Event type is determined by JSON field `type` (do not rely on SSE `event:` line)\n\nUnified JSON envelope (all events):\n  - type: string (required)\n  - timestamp: ISO 8601 string (required)\n  - requestId: string (required)\n  - tenantId: string (required)\n  - projectId: string (required)\n  - sessionId: string (optional)\n  - sequence: number (required, monotonic increasing within one SSE connection)\n  - payload: object (required, varies by type)\n\nMinimal event types (must be supported):\n  - meta, progress, tool.call, tool.result, message.delta, evidence.update, warning, error, final\n\nError event:\n  - type=error payload MUST be an ErrorResponse/AppError (message MUST be English)\n\nFinal event:\n  - type=final payload.status: success|error|cancelled\n\nNOTE: OpenAPI cannot fully model SSE event streams; the response schema below is documented as a raw stream of text/event-stream.",
+        "description": "Server-Sent Events (SSE) streaming endpoint for chat.\n\nContract (authoritative):\n  - docs/contracts/api-and-events-draft.md#6.1\n\nEvent encoding rules:\n  - Content-Type: text/event-stream\n  - Each SSE message MUST contain a single-line JSON in data: ...\n  - Event type is determined by JSON field `type` (do not rely on SSE `event:` line)\n\nUnified JSON envelope (all events):\n  - type: string (required)\n  - envelope: object (required)\n    - timestamp: ISO 8601 string (required)\n    - requestId: string (required)\n    - tenantId: string (required)\n    - projectId: string (required)\n    - sessionId: string (optional)\n    - sequence: number (required, monotonic increasing within one SSE connection)\n  - payload: object (required, varies by type)\n\nMinimal event types (must be supported):\n  - meta, progress, tool.call, tool.result, message.delta, evidence.update, warning, error, final\n\nError event:\n  - type=error payload MUST be an ErrorResponse (message MUST be English)\n\nFinal event:\n  - type=final payload.status: success|error|cancelled\n\nNOTE: OpenAPI cannot fully model SSE event streams; the response schema below is documented as a raw stream of text/event-stream.",
         "parameters": [
           {
             "name": "authorization",
@@ -475,6 +475,26 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "message"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "SSE stream. Each chunk is an SSE message whose data field is a single-line JSON envelope.",
@@ -486,19 +506,19 @@
                 "examples": {
                   "meta": {
                     "summary": "meta event",
-                    "value": "data: {\"type\":\"meta\",\"timestamp\":\"2026-02-19T00:00:00Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":1,\"payload\":{\"capabilities\":{\"streaming\":true,\"evidenceIncremental\":true,\"cancellationSupported\":true}}}\n\n"
+                    "value": "data: {\"type\":\"meta\",\"envelope\":{\"timestamp\":\"2026-02-19T00:00:00Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":1},\"payload\":{\"capabilities\":{\"streaming\":true,\"evidenceIncremental\":true,\"cancellationSupported\":true}}}\n\n"
                   },
                   "messageDelta": {
                     "summary": "message.delta event",
-                    "value": "data: {\"type\":\"message.delta\",\"timestamp\":\"2026-02-19T00:00:01Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":2,\"payload\":{\"delta\":\"Hello\"}}\n\n"
+                    "value": "data: {\"type\":\"message.delta\",\"envelope\":{\"timestamp\":\"2026-02-19T00:00:01Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":2},\"payload\":{\"delta\":\"Hello\"}}\n\n"
                   },
                   "error": {
-                    "summary": "error event (ErrorResponse/AppError)",
-                    "value": "data: {\"type\":\"error\",\"timestamp\":\"2026-02-19T00:00:02Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":3,\"payload\":{\"code\":\"AUTH_ERROR\",\"message\":\"Missing tenantId or projectId\",\"details\":{\"tenantId\":null,\"projectId\":null},\"retryable\":false,\"requestId\":\"req-001\"}}\n\n"
+                    "summary": "error event (ErrorResponse)",
+                    "value": "data: {\"type\":\"error\",\"envelope\":{\"timestamp\":\"2026-02-19T00:00:02Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":3},\"payload\":{\"code\":\"AUTH_ERROR\",\"message\":\"Missing required header: X-Tenant-Id\",\"details\":{\"header\":\"X-Tenant-Id\"},\"retryable\":false,\"requestId\":\"req-001\"}}\n\n"
                   },
                   "final": {
                     "summary": "final event",
-                    "value": "data: {\"type\":\"final\",\"timestamp\":\"2026-02-19T00:00:03Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":4,\"payload\":{\"status\":\"error\"}}\n\n"
+                    "value": "data: {\"type\":\"final\",\"envelope\":{\"timestamp\":\"2026-02-19T00:00:03Z\",\"requestId\":\"req-001\",\"tenantId\":\"tenant-a\",\"projectId\":\"project-a\",\"sessionId\":\"sess-001\",\"sequence\":4},\"payload\":{\"status\":\"error\"}}\n\n"
                   }
                 }
               }

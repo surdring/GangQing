@@ -28,12 +28,19 @@
 
 约束：`ErrorResponse` 仅包含以上字段；`tenantId/projectId/sessionId` 等上下文字段通过请求头、SSE envelope、审计与结构化日志贯穿，不在错误响应体中重复输出。
 
-常见错误码：
-
-- `VALIDATION_ERROR`：参数/格式不合法（含请求体 schema 校验失败）
-- `AUTH_ERROR`：鉴权失败或缺少 `tenant/project` scope
-- `FORBIDDEN`：RBAC 不允许
-- `INTERNAL_ERROR`：系统错误
+错误码枚举（最小集合，以 contracts 为准）：
+- `VALIDATION_ERROR`
+- `AUTH_ERROR`
+- `FORBIDDEN`
+- `NOT_FOUND`
+- `UPSTREAM_TIMEOUT`
+- `UPSTREAM_UNAVAILABLE`
+- `SERVICE_UNAVAILABLE`
+- `CONTRACT_VIOLATION`
+- `GUARDRAIL_BLOCKED`
+- `EVIDENCE_MISSING`
+- `EVIDENCE_MISMATCH`
+- `INTERNAL_ERROR`
 
 ## 时区处理策略
 

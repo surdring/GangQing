@@ -110,7 +110,7 @@ class RequestContext:
     capabilities: set[str]
 
 
-_REQUIRED_CAPABILITY = "metric_lineage:read"
+_REQUIRED_CAPABILITY = "metric:lineage:read"
 
 
 def _require_capability(ctx: RequestContext) -> None:

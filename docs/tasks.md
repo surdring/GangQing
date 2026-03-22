@@ -7,6 +7,7 @@
 - [ ] 1. 建立项目级对外契约基线：SSE 事件模型 + 统一错误模型 + Evidence schema（权威单一事实源）
 
   - 产物：完善 `docs/contracts/api-and-events-draft.md`（SSE 事件、错误码、Evidence 字段与约束）
+  - 契约约束：SSE 事件统一采用 Envelope 结构（顶层 `type` + 顶层上下文字段 + `payload`），且强制包含 `requestId/tenantId/projectId/sequence`
   - 产物：补齐 `docs/api/openapi.yaml`（对话入口、错误响应、SSE 说明）
   - 验证（单元测试）：`pytest -q`
   - 验证（冒烟测试）：启动服务后跑 `backend/scripts/sse_smoke_test.py`
@@ -16,6 +17,7 @@
 
   - 新增 `backend/` FastAPI 应用骨架与路由分层（API 网关 / 编排层 / 工具层）
   - 统一 `requestId` 生成与透传（HTTP→SSE→工具调用→审计）
+  - RequestContext：优先采用依赖注入（FastAPI Depends）显式注入；tenantId/projectId 缺失必须拒绝并记录可追踪的结构化日志（tenant/project 缺失时无法落库审计）
   - 日志：JSON 结构化输出（至少 `requestId/sessionId/toolName/stepId`）
   - 验证（单元测试）：`pytest -q`
   - 验证（冒烟测试）：`python -m compileall backend && python backend/scripts/start_server_and_healthcheck.py`
@@ -43,6 +45,10 @@
 
   - 数据库：实现初始化迁移（表、索引、约束）
   - 表覆盖：设备/物料维表；产量/能耗/成本事实；报警事件；维修工单；指标口径仓库；审计日志
+  - [x] 5.2 迁移与回滚策略（可回滚性验证）：`backend/scripts/postgres_migration_rollback_smoke_test.py`
+  - [x] 5.2 回滚策略单元护栏（每个 revision 必须具备 downgrade）：`backend/tests/test_migration_reversibility.py`
+  - [x] 5.3 Schema 测试口径（Smoke）：`backend/scripts/postgres_schema_smoke_test.py`
+  - [x] 5.3 Schema 测试口径（Unit-Integration，真实 Postgres）：`backend/tests/test_postgres_schema_cycle.py`
   - 验证（单元测试）：`pytest -q`
   - 验证（冒烟测试）：`backend/scripts/postgres_schema_smoke_test.py`
   - _Requirements: docs/requirements.md#R7.1, docs/design.md#2.6.1_
@@ -72,7 +78,7 @@
   - 验证（冒烟测试）：`backend/scripts/postgres_tool_smoke_test.py`
   - _Requirements: docs/requirements.md#R8.1, docs/design.md#2.5.2, docs/design.md#3.3_
 
-- [ ] 9. 工具参数 schema 校验与契约校验（Pydantic 单一事实源）
+- [x] 9. 工具参数 schema 校验与契约校验（Pydantic 单一事实源）
 
   - 输入：工具参数使用 Pydantic 校验，无效返回 `VALIDATION_ERROR`
   - 输出：工具结果与模型输出进行 schema 校验，违规返回 `CONTRACT_VIOLATION`
@@ -80,7 +86,7 @@
   - 验证（冒烟测试）：`backend/scripts/contract_validation_smoke_test.py`
   - _Requirements: docs/requirements.md#R8.2, docs/requirements.md#R9.3, docs/design.md#6.1_
 
-- [ ] 10. 工具超时与重试策略（可观测、可审计、可降级）
+- [x] 10. 工具超时与重试策略（可观测、可审计、可降级）
 
   - 超时：区分工具超时与模型超时，错误码映射 `UPSTREAM_TIMEOUT`
   - 重试：最多 3 次，记录次数与最终结果；流中输出 `warning/progress`
@@ -88,7 +94,7 @@
   - 验证（冒烟测试）：`backend/scripts/tool_timeout_retry_smoke_test.py`
   - _Requirements: docs/requirements.md#R8.3, docs/design.md#6.3, docs/design.md#6.4_
 
-- [ ] 11. 接入 llama.cpp 推理服务（超时/错误码映射/健康检查联动）
+- [x] 11. 接入 llama.cpp 推理服务（超时/错误码映射/健康检查联动）
 
   - 适配层：与 llama.cpp 通信；超时与错误映射 `UPSTREAM_UNAVAILABLE/UPSTREAM_TIMEOUT`
   - 健康检查：区分依赖不可用与系统 degraded
@@ -96,7 +102,7 @@
   - 验证（冒烟测试）：`backend/scripts/llamacpp_smoke_test.py`
   - _Requirements: docs/requirements.md#R9.1, docs/requirements.md#R12.3, docs/design.md#2.7.1_
 
-- [ ] 12. 实现意图识别与策略路由（QUERY/ANALYZE/ALERT/ACTION_PREPARE/ACTION_EXECUTE）
+- [x] 12. 实现意图识别与策略路由（QUERY/ANALYZE/ALERT/ACTION_PREPARE/ACTION_EXECUTE）
 
   - 意图输出：类别 + 置信度；不明确必须澄清
   - 策略：写操作倾向/越权敏感查询必须拦截或进入只读默认
@@ -107,12 +113,21 @@
 - [ ] 13. 编排层：工具链注册与 Function Calling（可控调用 + 可追溯证据）
 
   - 工具注册：配置化工具目录；可用工具集合由“角色 + 意图 + 数据域”约束
+  - 工具注册补充：优先支持装饰器声明式注册（减少样板代码），并在装饰器层自动化执行 RBAC/脱敏/审计/Evidence/超时重试等强制门禁
   - 事件：SSE 输出 `tool.call/tool.result`；错误时 `error` + `final`
   - 验证（单元测试）：`pytest -q`
   - 验证（冒烟测试）：`backend/scripts/tool_registry_smoke_test.py`
   - _Requirements: docs/requirements.md#R15.3, docs/design.md#2.5.3, docs/design.md#3.5.1_
 
-- [ ] 14. 证据链引擎：Claim/Citation/Lineage/ToolCallTrace 组装与增量更新
+- [ ] 13.1 工具装饰器自动注册（RBAC/脱敏/审计/Evidence/超时重试自动化）
+
+  - 装饰器：声明式定义工具元信息；自动注册到工具注册表
+  - 强制：装饰器层自动完成参数 schema 校验、RBAC 与数据域过滤、脱敏、审计落库、Evidence 生成
+  - 超时与重试：装饰器层统一套用（最多 3 次）并可观测（SSE progress/warning + 审计 attempt）
+  - 验证（单元测试）：`pytest -q`
+  - 验证（冒烟测试）：`backend/scripts/tool_registry_smoke_test.py && backend/scripts/tool_timeout_retry_smoke_test.py`
+
+- [x] 14. 证据链引擎：Claim/Citation/Lineage/ToolCallTrace 组装与增量更新
 
   - 规则：数值回答必须绑定 citation+time_range；计算必须绑定 `lineage_version`
   - 流式：工具返回后持续输出 `evidence.update`
@@ -121,9 +136,10 @@
   - 验证（冒烟测试）：`backend/scripts/evidence_smoke_test.py`
   - _Requirements: docs/requirements.md#R2.2, docs/requirements.md#R6.2, docs/design.md#3.3, docs/design.md#5.1_
 
-- [ ] 15. SSE 服务端输出：进度/消息增量/证据增量/结构化错误/结束事件完整序列
+- [x] 15. SSE 服务端输出：进度/消息增量/证据增量/结构化错误/结束事件完整序列
 
-  - 事件序列：`progress`→`tool.call`→`tool.result`→`message.delta`→`final`
+  - 事件序列：`progress`→`tool.call`→`tool.result`→`message.delta`→`final`（并在适用时输出 `evidence.update`）
+  - Envelope：所有事件统一 `type + envelope + payload`，且 envelope 强制包含 `requestId/tenantId/projectId/sessionId/timestamp/sequence`
   - 错误处理：发生错误必须尽快输出 `error`（含 `code/message/requestId/retryable`）并 `final`
   - 验证（单元测试）：`pytest -q`
   - 验证（冒烟测试）：`backend/scripts/sse_smoke_test.py`
@@ -138,7 +154,7 @@
   - 验证（冒烟测试）：`backend/scripts/security_guardrail_smoke_test.py`
   - _Requirements: docs/requirements.md#R10.1, docs/requirements.md#R10.3, docs/requirements.md#R17.2, docs/design.md#4.1_
 
-- [ ] 17. 审计落库与不可篡改策略（append-only + 查询也要被审计）
+- [x] 17. 审计落库与不可篡改策略（append-only + 查询也要被审计）
 
   - 审计事件：query/tool_call/response/error/（L4 预留 approval/write_operation）
   - 权限：审计查询受控；写入 append-only
@@ -396,6 +412,7 @@
 
   - `web/`：SSE 连接管理、事件解析、断线重连、超时与重试、取消传播
   - UI：分段渲染 `message.delta`、阶段 `progress`、结构化 `error`
+  - 契约：前端必须按 Envelope 结构解析 `type + envelope + payload`，并对 envelope 中 `sequence` 做单调递增校验与丢包提示（按 UX 选择展示形态）
   - 验证（单元测试）：`npm -C web test`
   - 验证（冒烟测试）：`npm -C web run build && backend/scripts/web_sse_e2e_smoke_test.py`
   - _Requirements: docs/requirements.md#R13.2, docs/requirements.md#R6.3, docs/design.md#3.5_

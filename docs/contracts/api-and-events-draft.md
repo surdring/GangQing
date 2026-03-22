@@ -32,11 +32,54 @@
 
 ### 2.1 ErrorResponse（草案字段）
 - `code`：稳定错误码
-  - 示例：`VALIDATION_ERROR`、`AUTH_ERROR`、`FORBIDDEN`、`NOT_FOUND`、`UPSTREAM_TIMEOUT`、`UPSTREAM_UNAVAILABLE`、`CONTRACT_VIOLATION`、`GUARDRAIL_BLOCKED`、`EVIDENCE_MISSING`、`EVIDENCE_MISMATCH`、`INTERNAL_ERROR`
+  - 示例：`VALIDATION_ERROR`、`AUTH_ERROR`、`FORBIDDEN`、`NOT_FOUND`、`UPSTREAM_TIMEOUT`、`UPSTREAM_UNAVAILABLE`、`SERVICE_UNAVAILABLE`、`CONTRACT_VIOLATION`、`GUARDRAIL_BLOCKED`、`EVIDENCE_MISSING`、`EVIDENCE_MISMATCH`、`INTERNAL_ERROR`
 - `message`：英文可读描述（强制）
 - `details?`：结构化上下文（禁止敏感信息）
 - `retryable`：是否可重试
 - `requestId`：链路追踪 ID（强制）
+
+#### 2.1.2 REST 错误码与 HTTP 状态码映射（强制）
+
+说明：REST 任意非 2xx 的响应体必须为 `ErrorResponse`；状态码按下表稳定映射。
+
+| ErrorResponse.code | HTTP Status | 说明 |
+| --- | --- | --- |
+| `VALIDATION_ERROR` | 400 | 业务参数不合法（例如工具入参、过滤条件、时间范围）；如为请求体 schema 校验失败，可选 422 |
+| `AUTH_ERROR` | 401 | 缺少/无效鉴权信息或缺少隔离上下文（`X-Tenant-Id/X-Project-Id`） |
+| `FORBIDDEN` | 403 | RBAC 拒绝（缺少 capability） |
+| `NOT_FOUND` | 404 | 资源不存在 |
+| `UPSTREAM_TIMEOUT` | 504 | 上游超时 |
+| `UPSTREAM_UNAVAILABLE` | 503 | 上游不可用 |
+| `SERVICE_UNAVAILABLE` | 503 | 服务过载/队列满/系统暂不可用 |
+| `GUARDRAIL_BLOCKED` | 409 | 红线/物理边界/安全策略阻断 |
+| `CONTRACT_VIOLATION` | 500 | 系统契约错误（输出不符合 schema）；客户端应携带 requestId 报障 |
+| `EVIDENCE_MISSING` | 422 | 证据缺失导致无法给出可验证结论（可按产品交互策略调整） |
+| `EVIDENCE_MISMATCH` | 409 | 证据与结论不一致 |
+| `INTERNAL_ERROR` | 500 | 未捕获异常 |
+
+注：SSE/WebSocket 流式错误不使用 HTTP 状态码表达失败原因，必须通过同构的 `ErrorResponse.code` 表达。
+
+#### 2.1.3 `details` 脱敏与允许字段（强制）
+
+通用规则：
+- `details` 仅允许结构化摘要，禁止放入密钥、token、cookie、原始 SQL、完整 rows、堆栈等大对象。
+- 对外 `ErrorResponse` 不得包含 `tenantId/projectId/userId/role/sessionId` 等上下文字段。
+
+禁止 key（大小写不敏感；命中任意片段即必须替换为 `[REDACTED]`）：
+- `password` / `passwd`
+- `secret`
+- `token`
+- `api_key` / `apikey`
+- `authorization`
+- `cookie` / `set-cookie`
+
+允许字段（建议最小化）：
+- `details.reason`：稳定原因枚举/字符串
+- `details.fieldErrors[]`：字段级错误摘要（path/reason）
+- `details.source`：契约来源标识（例如 `tool.postgres_readonly.result`）
+
+实现要求：
+- 审计事件 `actionSummary/argsSummary` 与对外 `details` 必须在落库/对外前执行递归脱敏（参考后端 `redaction` 机制：按 key 片段替换为 `[REDACTED]`）。
 
  约束：
  - 对外 `ErrorResponse` **仅允许**以上 5 个字段；禁止额外输出 `tenantId/projectId/sessionId` 等上下文字段（这些字段应通过请求头、SSE envelope、审计事件与结构化日志贯穿）。
@@ -48,6 +91,66 @@
 - SSE：当 `type=error` 时，其 `payload` 必须为 `ErrorResponse`。
 - SSE：当 `type=tool.result` 且 `status=failure` 时，`payload.error` 必须为 `ErrorResponse`。
 
+#### 2.1.0.1 SSE 事件 envelope（扁平字段，强制）
+
+说明：SSE 事件采用统一 envelope 字段，且**必须为扁平结构**（不得嵌套 `envelope` 对象），用于前端可解析渲染与可观测性关联。
+
+最小字段集合：
+- `type`：事件类型（见下文）
+- `timestamp`：UTC ISO 8601
+- `requestId`：链路追踪 ID（强制）
+- `tenantId` / `projectId`：隔离上下文（强制）
+- `sessionId?`：会话 ID（可选）
+- `sequence`：单连接内递增序号（强制）
+- `payload`：事件负载（随 `type` 变化）
+
+约束（强制）：
+- `message` 字段（若存在）必须为英文。
+- 任意不可恢复错误必须尽快输出 `type=error`（payload 为 `ErrorResponse`），并紧跟 `type=final`。
+
+#### 2.1.0.2 SSE 事件类型（最小集合，验收必需）
+
+说明：为支持“重试/降级可视化 + 结构化错误 + 可追溯审计”，SSE 流必须包含如下可解析事件。
+
+- `meta`
+  - `payload.capabilities.streaming: boolean`
+  - `payload.capabilities.evidenceIncremental: boolean`
+  - `payload.capabilities.cancellationSupported: boolean`
+
+- `progress`
+  - 用途：阶段提示（含重试/降级的用户可见信息）
+  - `payload.stage: string`
+  - `payload.message: string`（英文）
+  - `payload.stepId?: string`
+
+- `warning`
+  - 用途：可恢复异常（将重试/降级）
+  - `payload.code: string`（建议复用稳定错误码，如 `UPSTREAM_TIMEOUT`）
+  - `payload.message: string`（英文）
+  - `payload.details?: object | null`（结构化摘要，禁止敏感信息）
+
+- `tool.call`
+  - 用途：工具调用 attempt 开始
+  - `payload.toolName: string`
+  - `payload.attempt: number`
+  - `payload.maxAttempts: number`
+
+- `tool.result`
+  - 用途：工具调用 attempt 结果
+  - `payload.toolName: string`
+  - `payload.status: success | failure`
+  - `payload.attempt: number`
+  - `payload.maxAttempts: number`
+  - `payload.error?: ErrorResponse`（当 `status=failure` 时必须存在）
+
+- `error`
+  - 用途：不可恢复错误（必须尽快输出）
+  - `payload: ErrorResponse`
+
+- `final`
+  - 用途：流结束标志
+  - `payload.status: success | error | cancelled`
+
 #### 2.1.1 错误码枚举（最小集合，验收必需）
 
 | code | 触发场景（示例） | retryable | 客户端建议 |
@@ -58,11 +161,16 @@
 | `NOT_FOUND` | 资源不存在（例如查询不存在的实体） | `false` | 提示用户检查 ID/筛选条件 |
 | `UPSTREAM_TIMEOUT` | 上游服务请求超时（ERP/MES/OT 查询） | `true` | 适度重试（指数退避）；必要时降级展示缓存/最近一次结果 |
 | `UPSTREAM_UNAVAILABLE` | 上游服务不可用/网络隔离不可达 | `true` | 提示稍后重试；触发告警与运维排查 |
+| `SERVICE_UNAVAILABLE` | 服务过载/并发队列满/系统暂不可用 | `true` | 引导稍后重试；必要时降级；携带 requestId 便于排障 |
 | `CONTRACT_VIOLATION` | 上游返回不符合契约（字段缺失/类型不匹配） | `false` | 记录 requestId 并上报；不要自动重试 |
 | `GUARDRAIL_BLOCKED` | 触发红线/物理边界/安全策略阻断（写操作或越界） | `false` | 提示用户原因与合规流程；必要时走审批 |
 | `EVIDENCE_MISSING` | 数值结论缺少可追溯证据（Evidence 缺失） | `false` | 降级为“仅展示数据与来源”；提示用户补充证据 |
 | `EVIDENCE_MISMATCH` | 证据与结论不一致（口径/时间范围/来源不匹配） | `false` | 降级并提示用户；记录 requestId 便于审计 |
 | `INTERNAL_ERROR` | 未捕获异常/系统错误 | `false` | 提示用户稍后重试；携带 requestId 报障 |
+| `CONFIG_MISSING` | 启动时缺少必需配置项（环境变量未设置） | `false` | 检查 .env.example 并设置对应环境变量 |
+| `CONFIG_INVALID` | 配置值格式/取值范围不合法 | `false` | 检查配置值格式是否符合要求 |
+| `CONFIG_TYPE_ERROR` | 配置值类型不匹配（如预期 int 得 str） | `false` | 检查配置值类型是否正确 |
+| `CONFIG_DEPRECATED` | 使用了已废弃的配置项 | `false` | 迁移到新配置项，参考文档说明 |
 
 ### 2.2 错误处理验收点
 - 任意接口失败时均返回 ErrorResponse 结构（非裸字符串）。
@@ -102,9 +210,10 @@
   - `latencyMs?`：探测耗时（毫秒），可能为 `null`
   - `checkedAt`：探测时间（UTC ISO 8601）
   - `details?`：失败/降级的结构化摘要（**禁止敏感信息**）
-    - `reason?`：稳定原因枚举/字符串（示例：`not_configured` / `not_configured_model_provider_required` / `timeout` / `connection_failed` / `unexpected_response` / `no_model_provider_online`）
+    - `reason?`：稳定原因枚举/字符串（示例：`not_configured` / `not_configured_model_provider_required` / `timeout` / `connection_failed` / `unexpected_response` / `no_model_provider_online` / `config_missing` / `config_invalid` / `config_type_error`）
     - `errorClass?`：异常类型名（例如 `ReadTimeout`、`ConnectTimeout`）
     - `missingKeys?`：缺失的环境变量名列表（仅 key 名，不得包含值）
+    - `configCode?`：配置错误码（当 `name=config` 且状态异常时），值为 `CONFIG_MISSING` / `CONFIG_INVALID` / `CONFIG_TYPE_ERROR` / `CONFIG_DEPRECATED`
 
 状态码策略（强制）：
 - `200`：整体状态为 `healthy` 或 `degraded`
@@ -372,11 +481,36 @@
 
 ## 4. Audit Event（审计事件）对外契约要点
 
+### 4.0 Guardrail Rules Catalog（权威枚举，验收必需）
+
+说明：本章节用于枚举 Guardrail 默认规则目录（ruleId/category/defaultAction/errorCode/auditEventType），作为“规则 ID 可追溯”的权威来源。
+
+约束（强制）：
+- `ruleId` 必须为稳定字符串；审计与 Evidence 中引用的 ruleId 必须来自本目录或经过版本化扩展。
+- `defaultAction` 为策略默认动作；实际动作以运行时策略计算结果为准。
+- `errorCode` 映射遵循统一错误码（第 2 章）。
+- `auditEventType` 为命中时必须落库的审计事件类型。
+
+| ruleId | category | hitLocation | defaultAction | errorCode | auditEventType |
+| --- | --- | --- | --- | --- | --- |
+| `GUARDRAIL_INJ_DIRECT_IGNORE_RULES` | `prompt_injection` | `input` | `block_guardrail` | `GUARDRAIL_BLOCKED` | `guardrail.hit` |
+| `GUARDRAIL_INJ_DIRECT_SYSTEM_PROMPT_EXFIL` | `prompt_injection` | `input` | `block_guardrail` | `GUARDRAIL_BLOCKED` | `guardrail.hit` |
+| `GUARDRAIL_INJ_INDIRECT_INSTRUCTION_IN_CONTEXT` | `prompt_injection` | `tool_context` | `block_guardrail` | `GUARDRAIL_BLOCKED` | `guardrail.hit` |
+| `GUARDRAIL_OUTPUT_SYSTEM_PROMPT_LEAK` | `output_safety` | `output` | `block_guardrail` | `GUARDRAIL_BLOCKED` | `guardrail.hit` |
+| `GUARDRAIL_OUTPUT_SENSITIVE_TOKEN` | `output_safety` | `output` | `block_guardrail` | `GUARDRAIL_BLOCKED` | `guardrail.hit` |
+
+
 ### 4.1 审计事件类型
 - `query`
 - `tool_call`
 - `approval`
 - `write_operation`
+
+补充（验收必需）：
+- `guardrail.hit`：安全策略命中（阻断/降级）；禁止敏感原文落库。
+- `auth.denied`：鉴权失败/缺 token 等（与 `AUTH_ERROR` 对齐）。
+- `rbac.denied`：RBAC 拒绝（与 `FORBIDDEN` 对齐）。
+- `data.masked`：审计检索发生脱敏策略命中（用于追踪策略生效）。
 
 ### 4.2 审计事件最小字段
 - `eventId`
@@ -388,6 +522,25 @@
 - `resource`（访问对象/工具名/草案/执行单等）
 - `actionSummary`（脱敏后的参数摘要）
 - `result`（success/failure + errorCode）
+
+#### 4.2.1 `guardrail.hit` actionSummary 最小字段约束（验收必需）
+
+说明：`guardrail.hit` 的 `actionSummary` 必须包含“可追溯但不泄露”的最小集合，用于复核拦截原因。
+
+最小字段集合（强制）：
+- `stage`：命中阶段（示例：`guardrail.input` / `guardrail.tool_context` / `guardrail.output`）
+- `decisionAction`：`allow|warn_degrade|block_forbidden|block_guardrail`
+- `policyVersion`：策略版本（示例：`guardrail_default@v1`）
+- `riskLevel`：`low|medium|high`
+- `timestamp`：UTC ISO 8601
+- `hits[]`：命中摘要数组（元素至少包含 `ruleId/category/hitLocation/reasonSummary`）
+
+按阶段补充字段（可选但推荐；若存在必须脱敏）：
+- `inputDigest`：仅摘要（`sha256/length`），不得包含原文
+- `toolName` / `toolCallId`：仅当 `stage=guardrail.tool_context` 或与工具调用有关时
+
+禁止字段（强制）：
+- 用户输入原文、系统提示词、工具返回原文、密钥/Token/凭证等任何敏感信息
 
 ### 4.3 审计存储与检索
 - 先写 PostgreSQL（主存证），后写 Elasticsearch（ES）用于检索增强。
@@ -416,18 +569,18 @@
 
 ## 6. 对话流式协议（SSE + WebSocket）
 
-### 6.1 SSE：`GET /api/v1/chat/stream`
+### 6.1 SSE：`POST /api/v1/chat/stream`
 
 用途：对话流式输出（长耗时场景优先 SSE）。
 
 #### 6.1.1 协议与序列化规则（强制）
 - 响应 `Content-Type`：`text/event-stream`
 - 每条 SSE 事件的 `data:` 必须为**单行 JSON**（禁止多行 JSON），便于客户端稳定解析。
-- 事件类型通过 JSON 字段 `type` 区分（不依赖 SSE 的 `event:` 行）。
+- 事件类型通过 JSON 字段 `type` 区分（**不依赖** SSE 的 `event:` 行；服务端可输出 `event:` 作为兼容，但客户端与测试必须以 `type` 为准）。
 
 #### 6.1.2 SSE 统一 Envelope（强制）
 
-所有事件同形，统一 envelope 字段如下：
+所有事件同形，统一结构如下：
 
 - `type`（string，强制）：事件类型枚举，见 6.1.3
 - `timestamp`（string，强制）：ISO 8601 时间戳
@@ -435,24 +588,34 @@
 - `tenantId`（string，强制）：租户隔离 ID
 - `projectId`（string，强制）：项目隔离 ID
 - `sessionId`（string，可选）：对话会话 ID（若有）
-- `sequence`（number，强制）：单 SSE 连接内单调递增（从 1 开始或从任意正整数开始均可；但必须递增）
+- `sequence`（number，强制）：单 SSE 连接内单调递增
 - `payload`（object，强制）：事件负载，与 `type` 对应
 
 约束：
-- 禁止在 `payload` 内重复输出 `requestId/tenantId/projectId/sessionId/sequence/timestamp/type`。
+- 禁止在 `payload` 内重复输出 `requestId/tenantId/projectId/sessionId/sequence/timestamp` 等上下文字段。
 - 禁止输出无法被 JSON 解析的值（例如 `NaN`/`Infinity`）。
 
 #### 6.1.3 最小事件类型集合（验收必需）
 
-- `meta`：元信息（首事件必须为 `meta`）
-- `progress`：阶段/步骤进度
-- `tool.call`：工具调用开始（参数必须脱敏摘要）
-- `tool.result`：工具调用结束（摘要 + 可选错误 + 可选 evidence 引用）
-- `message.delta`：assistant 文本增量
-- `evidence.update`：证据链增量（append/update/reference）
-- `warning`：非致命降级/不确定项提示
-- `error`：结构化错误（payload 必须同构 ErrorResponse）
-- `final`：结束事件（正常/错误/取消）
+以下事件类型为对外契约强制支持的最小集合，所有实现必须遵循：
+
+| 事件类型 | 用途 | 首次出现时机 | 强制约束 |
+|---------|------|------------|---------|
+| `meta` | 元信息声明 | 必须为首事件 | `payload.capabilities` 必须声明 `streaming/evidenceIncremental/cancellationSupported` |
+| `progress` | 阶段/步骤进度 | 处理开始后 | `payload.stage` 与 `payload.message` 必填 |
+| `tool.call` | 工具调用开始 | 工具调用前 | `payload.toolCallId/toolName/argsSummary` 必填；`argsSummary` 必须脱敏 |
+| `tool.result` | 工具调用结束 | 工具调用后 | `payload.toolCallId/toolName/status` 必填；`status=failure` 时 `payload.error` 必须为 ErrorResponse |
+| `message.delta` | assistant 文本增量 | 生成回答时 | `payload.delta` 必填 |
+| `evidence.update` | 证据链增量 | 工具返回证据后 | `payload.mode` 必填；`mode=append\|update` 时必须包含 `payload.evidences` |
+| `warning` | 非致命降级/不确定项 | 检测到降级条件时 | `payload.code` 与 `payload.message` 必填 |
+| `error` | 结构化错误 | 发生错误时 | `payload` 必须为完整 ErrorResponse 结构 |
+| `final` | 结束事件 | 流结束前 | `payload.status` 必填；必须为最后一个事件 |
+
+**事件序列约束（强制）**：
+- `meta` 必须为首事件（`sequence=1`）
+- `final` 必须为最后一个事件，之后不得再输出任何事件
+- 发生错误时必须输出 `error` 事件，并紧随 `final(status=error)`
+- `sequence` 在同一 SSE 连接内必须单调递增，不得跳号或重复
 
 #### 6.1.4 各事件 payload 约束（字段级，验收必需）
 
@@ -487,25 +650,24 @@
 
 ##### `evidence.update.payload`
 - `mode`（string，强制）：`append|update|reference`
-- `evidence`（object，可选）：Evidence 对象（见第 3 章 Evidence）
-- `evidenceId`（string，可选）：证据引用 ID
+- `evidences`（array，可选）：Evidence 对象数组（元素见第 3 章 Evidence）
+- `evidenceIds`（array，可选）：证据引用 ID 数组（元素为 `evidenceId` 字符串）
 
 约束：
-- `mode=append|update`：必须包含 `evidence`
-- `mode=reference`：必须包含 `evidenceId`
+- `mode=append|update`：必须包含 `evidences` 且 `evidences.length >= 1`
+- `mode=reference`：必须包含 `evidenceIds` 且 `evidenceIds.length >= 1`
 
 映射规则（强制）：
-- `mode=append`：新增一条 Evidence；`payload.evidence` 必须满足 3.1 的最小字段集合与字段级约束。
-- `mode=update`：更新既有 Evidence；`payload.evidence` 必须包含 `evidenceId`，并以 `evidenceId` 作为幂等键。
-- `mode=reference`：仅引用；前端可按需通过证据链检索接口拉取详情（本草案不强制要求在线回查）。
+- `mode=append`：新增 Evidence；`payload.evidences[*]` 必须满足 3.1 的最小字段集合与字段级约束。
+- `mode=update`：更新既有 Evidence；`payload.evidences[*].evidenceId` 作为幂等键，更新必须遵守“字段不可回退/不可篡改来源”规则。
+- `mode=reference`：仅引用；前端可按需通过证据链检索接口拉取详情。
 
 ##### `warning.payload`
 - `code`（string，强制）：稳定码（推荐复用错误码：`EVIDENCE_MISSING`/`EVIDENCE_MISMATCH`/`GUARDRAIL_BLOCKED` 等，或扩展为 warning 专用枚举）
-- `message`（string，强制）：面向用户的提示（允许中文）
+- `message`（string，强制）：英文可读描述（必须英文，便于日志检索）
 - `details`（object，可选）：结构化上下文（禁止敏感信息）
 
-约束：
-- `warning` 不要求英文 `messageEn`；英文可检索能力由 `code` + 结构化日志字段保障。
+
 
 ##### `error.payload`
 `payload` 必须为统一错误模型 ErrorResponse（见第 2 章），至少包含：
@@ -519,21 +681,85 @@
 - `status`（string，强制）：`success|error|cancelled`
 - `summary`（object，可选）：脱敏摘要（可用于客户端收尾/归档）
 
+约束（强制）：
+- `final.payload` **不得**包含 `done`、`requestId` 等冗余字段；结束语义以 `status` 为准。
+
 #### 6.1.5 事件序列验收（最小序列，强制）
 
 - 成功路径：`meta` ->（0..n 条任意事件）-> `final(status=success)`
 - 失败路径：`meta` ->（0..n 条任意事件）-> `error` -> `final(status=error)`
 
+取消路径（强制，见 6.1.6）：
+- 显式取消（连接仍存活）：`meta` ->（0..n 条任意事件）-> `final(status=cancelled)`
+- 客户端断连：服务端必须尽快停止后续处理（停止输出/停止后续调用），但**不保证**客户端一定能收到 `final(status=cancelled)`（因为连接已断开）
+
 约束：
 - `meta` 必须为首事件。
 - `final` 必须为最后一个事件；`final` 之后不得再输出任何事件。
 - 发生错误时必须尽快输出 `error`，并紧随 `final(status=error)` 结束。
-- `sequence` 在同一 SSE 连接内必须单调递增。
+- `envelope.sequence` 在同一 SSE 连接内必须单调递增。
 
 验收点：
 - `error` 事件可解析为统一错误模型。
 - 客户端取消（断开连接）需能向下传播，至少验证“服务端停止继续输出/停止后续工具调用”。
 - 必须提供 SSE 端到端取证材料（抓包/录屏 + 事件样例），用于证明分段渲染、结构化错误、取消传播均满足口径。
+
+#### 6.1.6 显式取消（REST）（强制）
+
+> 目的：为“用户点击停止生成”等场景提供**可控、可审计、可自动化验证**的取消入口。
+
+##### 端点
+
+- `POST /api/v1/chat/stream/cancel`
+
+##### 鉴权与隔离（强制）
+
+- 必须要求登录态。
+- 必须要求能力：`chat:conversation:stream`。
+- 必须执行租户/项目隔离：只能取消同一 `tenantId/projectId` 作用域内的 `requestId`。
+
+##### 请求
+
+请求体（JSON）：
+
+```json
+{
+  "requestId": "rid_xxx"
+}
+```
+
+约束（强制）：
+- `requestId` 必填且非空。
+
+##### 响应
+
+成功（200）：
+
+```json
+{
+  "status": "ok"
+}
+```
+
+失败（非 2xx）：必须返回统一错误模型 ErrorResponse（见第 2 章），且 `message` 必须英文。
+
+推荐错误码（最小集合）：
+- `VALIDATION_ERROR`：缺少/非法 `requestId`
+- `AUTH_ERROR`：未登录/鉴权失败
+- `FORBIDDEN`：缺少能力或跨 tenant/project 取消
+- `NOT_FOUND`：`requestId` 未注册/已结束（实现可选；若实现选择幂等 ok，也必须在文档中声明）
+
+##### 与 SSE 的行为约束（强制）
+
+- 当服务端收到显式取消请求后：
+  - 必须尽快停止该 `requestId` 的后续处理（推理/工具调用/证据生成等）。
+  - 若 SSE 连接仍存活：必须输出 `final(payload.status=cancelled)`，并且 `final` 之后不得再输出任何事件。
+  - 若 SSE 连接已断开：不要求输出 `final`，但仍必须停止后续处理。
+
+##### 可验证口径（强制）
+
+- 取消信号生效时间点之后：**不得再发起新的 `tool.call`**。
+  - 允许在取消生效前已发起的工具调用自然结束或被工具层取消回调中断（实现策略可选），但不得出现“取消后仍持续发起新工具调用”的行为。
 
 ### 6.2 WebSocket：`/ws/chat`
 - 消息必须是 JSON 事件，建议最小事件集合与 SSE 对齐：
@@ -547,6 +773,18 @@
 ## 7. 审计检索接口（验收必需）
 
 ### 7.1 `GET /api/v1/audit/events`
+- 查询参数（最小集合，验收必需）：
+  - `limit`（int）
+  - `offset`（int）
+  - `requestId`（string，可选）：按链路追踪 ID 过滤
+  - `unmask`（boolean，可选，默认 false）：是否请求返回未脱敏的 `actionSummary`
+
+- 权限与脱敏（强制）：
+  - `actionSummary` 在审计落库时必须执行默认脱敏（禁止把敏感原文写入审计表）。
+  - `unmask=true` 仅表示客户端显式请求“尽可能返回未脱敏版本”。
+    - 服务端必须执行 RBAC：仅当具备 `data:unmask:read` 能力时才可接受该请求；否则返回 `ErrorResponse(code=FORBIDDEN)`。
+    - 即使具备能力，服务端也不得绕过“审计落库禁止敏感原文”的红线；若落库数据已脱敏，则 `unmask=true` 也可能无法还原原文。
+
 - 过滤条件（要点）：
   - `requestId`、`sessionId`、`userId`
   - `tenantId`、`projectId`

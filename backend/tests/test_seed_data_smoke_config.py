@@ -15,6 +15,9 @@ for _p in (str(_BACKEND_DIR), str(_SCRIPTS_DIR)):
         sys.path.insert(0, _p)
 
 from gangqing_db.errors import ConfigMissingError, ErrorCode, MigrationError
+from gangqing_db.errors import map_db_error
+
+from sqlalchemy.exc import OperationalError
 
 import seed_data_smoke_test
 
@@ -52,3 +55,26 @@ def test_require_database_url_missing_must_fail_with_request_id() -> None:
     assert err.message.isascii()
     assert err.request_id == "run-3"
     assert "GANGQING_DATABASE_URL" in err.message
+
+
+def test_main_missing_database_url_must_exit_1_and_print_english_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch("gangqing_db.settings._load_dotenv_file", return_value=None):
+            monkeypatch.setattr(sys, "argv", ["seed_data_smoke_test.py"])
+            exit_code = seed_data_smoke_test.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Error [" in captured.err
+    assert "Missing required configuration" in captured.err
+    assert captured.err.isascii()
+
+
+def test_map_db_error_operational_error_must_be_upstream_unavailable_with_request_id() -> None:
+    exc = OperationalError("SELECT 1", {}, Exception("connect failed"))
+    mapped = map_db_error(exc, request_id="run-4")
+    assert mapped.code == ErrorCode.UPSTREAM_UNAVAILABLE
+    assert mapped.message.isascii()
+    assert mapped.request_id == "run-4"

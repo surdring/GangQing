@@ -36,6 +36,28 @@ def _healthcheck(url: str, *, timeout_seconds: float) -> tuple[int, str]:
         return e.code, body
 
 
+def _safe_body_summary(body: str, *, max_chars: int = 2000) -> str:
+    text = (body or "").strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "..."
+
+    lowered = text.lower()
+    forbidden_fragments = [
+        "postgresql://",
+        "psycopg://",
+        "password",
+        "secret",
+        "sk-",
+        "nvapi-",
+        "authorization",
+        "x-api-key",
+    ]
+    for frag in forbidden_fragments:
+        if frag in lowered:
+            return "[REDACTED]"
+    return text
+
+
 def _require_env(name: str) -> str:
     value = (os.environ.get(name) or "").strip()
     if not value:
@@ -82,11 +104,11 @@ def _load_dotenv_file(path: Path) -> None:
 
 
 def main() -> int:
-    host = os.environ.get("GANGQING_API_HOST", "127.0.0.1")
-    port = int(os.environ.get("GANGQING_API_PORT", "8000"))
-
     repo_root = Path(__file__).resolve().parents[2]
     _load_dotenv_file(repo_root / ".env.local")
+
+    host = (os.environ.get("GANGQING_API_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port = int((os.environ.get("GANGQING_API_PORT") or "8000").strip() or "8000")
 
     _require_env("GANGQING_DATABASE_URL")
     _require_any_env({"GANGQING_LLAMACPP_BASE_URL", "GANGQING_PROVIDER_HEALTHCHECK_URL"})
@@ -152,7 +174,8 @@ def main() -> int:
                 body = resp.read().decode("utf-8")
                 if resp.status != 200:
                     raise RuntimeError(
-                        f"Healthcheck failed: status={resp.status}, body={body}"
+                        "Healthcheck failed: expected HTTP 200. "
+                        f"status={resp.status}, body={_safe_body_summary(body)}"
                     )
                 try:
                     obj = json.loads(body)
@@ -162,6 +185,10 @@ def main() -> int:
                     raise RuntimeError(
                         f"Healthcheck requestId mismatch: expected={request_id}, got={obj.get('requestId')}"
                     )
+                if obj.get("status") not in {"healthy", "degraded", "unhealthy"}:
+                    raise RuntimeError(
+                        f"Healthcheck invalid status value: {obj.get('status')}"
+                    )
                 if not isinstance(obj.get("dependencies"), list):
                     raise RuntimeError("Healthcheck dependencies must be a list")
                 dep_names = {d.get("name") for d in obj.get("dependencies", []) if isinstance(d, dict)}
@@ -170,7 +197,26 @@ def main() -> int:
                         raise RuntimeError(f"Healthcheck missing dependency item: {required}")
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8")
-            raise RuntimeError(f"Healthcheck failed: status={e.code}, body={body}") from e
+            raise RuntimeError(
+                "Healthcheck failed: expected HTTP 200. "
+                f"status={e.code}, body={_safe_body_summary(body)}"
+            ) from e
+            try:
+                obj = json.loads(body)
+            except json.JSONDecodeError as je:
+                raise RuntimeError(f"Healthcheck response is not JSON: {body}") from je
+            if obj.get("requestId") != request_id:
+                raise RuntimeError(
+                    f"Healthcheck requestId mismatch: expected={request_id}, got={obj.get('requestId')}"
+                )
+            if obj.get("status") not in {"healthy", "degraded", "unhealthy"}:
+                raise RuntimeError(f"Healthcheck invalid status value: {obj.get('status')}")
+            if not isinstance(obj.get("dependencies"), list):
+                raise RuntimeError("Healthcheck dependencies must be a list")
+            dep_names = {d.get("name") for d in obj.get("dependencies", []) if isinstance(d, dict)}
+            for required in {"config", "postgres", "llama_cpp", "provider", "model"}:
+                if required not in dep_names:
+                    raise RuntimeError(f"Healthcheck missing dependency item: {required}")
         except TimeoutError as e:
             raise RuntimeError(
                 "Healthcheck failed: request timed out. "

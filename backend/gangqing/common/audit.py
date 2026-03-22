@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import time
 import threading
 from typing import Any
 
@@ -34,11 +35,17 @@ def write_audit_event(
     event_type: str,
     resource: str | None,
     action_summary: dict[str, Any] | None,
+    result_summary: dict[str, Any] | None = None,
     result_status: str,
     error_code: str | None = None,
+    error_message: str | None = None,
+    tool_call_id: str | None = None,
     evidence_refs: list[str] | None = None,
 ) -> None:
     try:
+        error_obj = None
+        if error_code is not None and error_message is not None:
+            error_obj = {"code": error_code, "message": error_message}
         event = AuditLogEvent(
             eventType=event_type,
             requestId=ctx.request_id,
@@ -49,6 +56,10 @@ def write_audit_event(
             role=ctx.role,
             resource=resource,
             actionSummary=action_summary,
+            resultSummary=result_summary,
+            toolCallId=tool_call_id,
+            stepId=ctx.step_id,
+            error=error_obj,
             result=result_status,
             errorCode=error_code,
             evidenceRefs=evidence_refs,
@@ -70,10 +81,20 @@ def write_audit_event(
         if settings.audit_async_enabled:
             executor = _get_audit_executor()
 
-            def _write() -> None:
+            def _write_with_retry() -> None:
+                last_err: Exception | None = None
+                for attempt in range(1, 3):
+                    try:
+                        insert_audit_log_event(event, ctx=ctx)
+                        return
+                    except Exception as e:
+                        last_err = e
+                        time.sleep(0.05 * attempt)
+                raise last_err or RuntimeError("Audit write failed")
+            try:
+                executor.submit(_write_with_retry)
+            except Exception:
                 insert_audit_log_event(event, ctx=ctx)
-
-            executor.submit(_write)
         else:
             insert_audit_log_event(event, ctx=ctx)
     except Exception as e:
@@ -93,6 +114,8 @@ def write_tool_call_event(
     *,
     ctx: RequestContext,
     tool_name: str,
+    tool_call_id: str | None = None,
+    duration_ms: int | None = None,
     args_summary: dict[str, Any] | None,
     result_status: str,
     error_code: str | None = None,
@@ -100,11 +123,14 @@ def write_tool_call_event(
 ) -> None:
     write_audit_event(
         ctx=ctx,
-        event_type=AuditEventType.TOOL_CALL.value,
+        event_type=AuditEventType.TOOL_CALL_AUDIT.value,
         resource=tool_name,
+        tool_call_id=tool_call_id,
         action_summary={
             "toolName": tool_name,
+            "durationMs": duration_ms,
             "argsSummary": args_summary,
+            "stepId": ctx.step_id,
         },
         result_status=result_status,
         error_code=error_code,

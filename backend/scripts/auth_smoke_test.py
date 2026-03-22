@@ -319,6 +319,55 @@ def main() -> int:
         if not found_tool_call:
             raise RuntimeError("Expected tool_call audit event not found")
 
+        # 5.6) FORBIDDEN: finance cannot run tools/demo
+        status, forbid_tool = _request_json(
+            f"http://{host}:{port}/api/v1/tools/demo",
+            method="POST",
+            headers={
+                **base_headers,
+                "X-Request-Id": "rid_auth_smoke_tool_forbid_1",
+                "Authorization": f"Bearer {fin_token}",
+                "Content-Type": "application/json",
+            },
+            body={"query": "q_forbid"},
+        )
+        if status != 403:
+            raise RuntimeError(
+                f"Expected 403 for forbidden tool access, got {status}: {forbid_tool}"
+            )
+        _assert_error_response(forbid_tool)
+        if forbid_tool.get("code") != "FORBIDDEN":
+            raise RuntimeError(f"Expected FORBIDDEN, got: {forbid_tool}")
+
+        status, forbid_tool_events = _request_json(
+            "http://{host}:{port}/api/v1/audit/events?requestId=rid_auth_smoke_tool_forbid_1".format(
+                host=host, port=port
+            ),
+            method="GET",
+            headers={
+                **base_headers,
+                "X-Request-Id": "rid_auth_smoke_tool_forbid_2",
+                "Authorization": f"Bearer {access_token}",
+            },
+        )
+        if status != 200:
+            raise RuntimeError(
+                f"Audit query for forbidden tool request failed: status={status}, body={forbid_tool_events}"
+            )
+        _assert_audit_events_response(forbid_tool_events)
+        forbid_tool_items = forbid_tool_events.get("items")
+        if not isinstance(forbid_tool_items, list) or not forbid_tool_items:
+            raise RuntimeError(
+                f"Expected non-empty forbidden tool audit items: {forbid_tool_events}"
+            )
+
+        found_rbac_denied_tool = any(
+            (isinstance(it, dict) and it.get("eventType") == "rbac.denied")
+            for it in forbid_tool_items
+        )
+        if not found_rbac_denied_tool:
+            raise RuntimeError("Expected rbac.denied audit event for forbidden tool not found")
+
         # 6) verify structured logs contain requestId http_request
         found = False
         if proc.stdout is not None:

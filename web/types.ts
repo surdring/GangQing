@@ -11,6 +11,7 @@ export interface Evidence {
   confidence: 'High' | 'Medium' | 'Low';
   details: string;
   type: 'SAP' | 'MES' | 'DCS' | 'IoT' | 'Manual';
+  validation: 'verifiable' | 'not_verifiable' | 'out_of_bounds' | 'mismatch';
   dataPoints?: { label: string; value: string | number; change?: number }[];
 }
 

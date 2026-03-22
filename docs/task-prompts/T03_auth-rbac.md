@@ -13,6 +13,13 @@
 
 本任务不引入任何写操作能力；任何写操作相关能力必须按只读默认策略拦截或进入 L4 治理流程。
 
+你需要输出的内容必须能直接指导后续子任务（3.1/3.2/3.3）落地：
+- 目录与模块边界（Auth/RBAC/Audit/Config/RequestContext）
+- 对外接口契约（REST + 结构化错误）
+- 能力点命名与声明位置（API 与工具）
+- 审计事件类型与最小字段（可落库/可检索/可按 requestId 聚合）
+- 自动化验收口径（单元测试 + 冒烟测试，且连接真实服务）
+
 # Critical Rules
 - **NO CODE IMPLEMENTATION**: 此 Umbrella 阶段禁止输出任何具体实现代码/函数体。
 - **PLANNING ONLY**: 只允许输出“怎么做/分几步/文件结构/契约长什么样/验收怎么验”。
@@ -36,6 +43,7 @@
 - tasks: docs/tasks.md（L1 - Task 3）
 - contracts: docs/contracts/api-and-events-draft.md（RequestContext、ErrorResponse、Audit Event）
 - api docs: docs/api/openapi.yaml（登录端点与错误响应）
+- security policy: docs/security/auth-rbac-audit-policy.md（Auth/RBAC/Audit 一致性策略与拒绝矩阵）
 
 # Execution Plan
 1) Task 3.1（JWT 登录与 token 生命周期）
@@ -59,22 +67,39 @@
 
 3) Task 3.3（审计与拒绝策略：可追溯、可检索、可取证）
 - Goal:
-  - 明确“哪些事件必须审计、审计字段最小集合、脱敏规则”
+  - 明确“哪些事件必须审计、审计字段最小集合、脱敏规则”（以 `docs/security/auth-rbac-audit-policy.md` 为准）
   - 定义如何通过 `requestId` 聚合整条链路的审计证据
-  - 明确拒绝策略与错误码（`AUTH_ERROR` vs `FORBIDDEN`）
+  - 明确拒绝策略矩阵与错误码（`AUTH_ERROR` vs `FORBIDDEN`）
 - Deliverables:
-  - 审计事件类型与最小字段（对齐 contracts 第 4 章）
+  - 审计事件类型与最小字段（对齐 contracts 与 security policy）
   - 关键场景审计点位清单：登录、鉴权失败、越权、工具调用（含参数摘要）、响应摘要
+  - 拒绝策略矩阵（对外错误码 + HTTP 状态码 + 审计 eventType）
 
 # Deliverables Definition
-- [ ] **Directory / Modules**: 认证、RBAC、审计、配置加载分别落在哪些模块（只需规划到目录/模块名级别）。
+- [ ] **Directory / Modules**: 认证、RBAC、审计、配置加载、RequestContext 分别落在哪些模块（只需规划到目录/模块名级别）。
 - [ ] **Environment Variables**: JWT 与鉴权相关配置项清单与校验要求（必须对齐 `docs/design.md#2.9` 的“配置外部化与快速失败”）。
+  - 必须明确：`JWT_SECRET` / `JWT_ALGORITHM` / `JWT_EXPIRE_SECONDS`
+  - 必须明确：多租户隔离相关请求头 `X-Tenant-Id` / `X-Project-Id`
+  - 必须明确：缺失配置时快速失败，错误 `message` 必须英文
 - [ ] **API Contracts**:
   - 登录端点的 request/response schema
   - 错误响应统一为 `ErrorResponse`（字段严格对齐 contracts 2.1）
-- [ ] **Auth & RBAC**: 角色/能力点/拒绝策略定义，能力点命名规范与声明位置。
-- [ ] **Audit Events**: 审计事件最小字段、脱敏策略与取证策略（按 requestId 聚合）。
-- [ ] **Observability**: `requestId/tenantId/projectId/userId/role` 在日志与审计中的贯穿约束。
+  - 401 vs 403 的边界：Auth 失败返回 401（`AUTH_ERROR`），权限不足返回 403（`FORBIDDEN`）
+- [ ] **Auth & RBAC**:
+  - 角色/能力点/拒绝策略定义
+  - 能力点命名规范 `domain:resource:action`
+  - 能力点声明位置：API 路由（端点）+ 工具注册（tool decorator / registry）
+  - 角色-能力点矩阵（必须以表格落盘在本提示词中，作为实现权威口径）
+- [ ] **Rejection Matrix（强制，表格）**:
+  - 缺少 `Authorization` / token 过期 / scope 与 tenantId/projectId 不一致 / capability 缺失
+  - 对外错误码（`AUTH_ERROR`/`FORBIDDEN`/`CONTRACT_VIOLATION`）、HTTP 状态码、是否写审计、审计 eventType
+- [ ] **Audit Events**:
+  - 审计事件类型与最小字段（以 `docs/security/auth-rbac-audit-policy.md` 为准）
+  - 脱敏策略（禁止记录 token/password/secret 等）
+  - 取证策略：按 `requestId + tenantId + projectId` 聚合
+- [ ] **Observability**:
+  - `requestId/tenantId/projectId/userId/role` 在日志与审计中的贯穿约束
+  - 关键日志字段：`requestId`（必填）、`eventType`、`userId`、`role`、`capability`、`toolName`（如适用）
 
 # Verification
 - Automated Tests（必须可自动化断言）：
@@ -87,6 +112,9 @@
   - Smoke: `backend/scripts/auth_smoke_test.py`
     - 必须连接真实服务（真实 FastAPI + 真实 Postgres）
     - 若脚本不存在：子任务必须补齐该脚本并纳入验证链路
+  - Contract（若仓库已有契约测试入口）：
+    - 需要断言 REST 错误体严格为 `ErrorResponse`（字段不多不少）
+    - 需要断言拒绝场景会写入审计事件且 `requestId` 可关联
 
 # Output Requirement
 输出执行蓝图（Markdown），禁止写代码。
@@ -115,6 +143,15 @@
 - PRD: docs/requirements.md（R1.1）
 - tasks: docs/tasks.md（3.1）
 - contracts: docs/contracts/api-and-events-draft.md（ErrorResponse/RequestContext）
+- TDD: docs/design.md（3.1、6.1）
+- security policy: docs/security/auth-rbac-audit-policy.md（审计字段/拒绝矩阵/脱敏要求）
+
+# Target Files（必须明确）
+- backend/gangqing/api/...
+- backend/gangqing/app/...
+- backend/gangqing/common/...
+- backend/gangqing/schemas/...
+- backend/gangqing_db/...
 
 # Execution Plan
 1) 定义 Pydantic 请求/响应模型与错误响应（ErrorResponse）。
@@ -161,6 +198,14 @@
 - PRD: docs/requirements.md（R1.2）
 - tasks: docs/tasks.md（3.2）
 - contracts: docs/contracts/api-and-events-draft.md
+- TDD: docs/design.md（3.1、4.4、6.1）
+- security policy: docs/security/auth-rbac-audit-policy.md（rbac.denied 事件与拒绝矩阵）
+
+# Target Files（必须明确）
+- backend/gangqing/api/...
+- backend/gangqing/tools/...
+- backend/gangqing/common/...
+- backend/gangqing_db/...
 
 # Execution Plan
 1) 定义角色与 capability 列表（最小闭环：厂长/调度员/维修工/财务）。
@@ -211,6 +256,12 @@
 - contracts: docs/contracts/api-and-events-draft.md（4.1-4.3 审计事件最小字段；2.1 ErrorResponse）
 - security: docs/security/auth-rbac-audit-policy.md（拒绝策略矩阵/审计事件类型/脱敏规则权威口径）
 
+# Target Files（必须明确）
+- backend/gangqing_db/audit_log.py
+- backend/gangqing_db/audit_query.py
+- backend/gangqing/common/...
+- backend/gangqing/api/...
+
 # Execution Plan
 1) 明确审计事件模型（最小字段集合）与事件类型：至少覆盖 `query/tool_call/error`，并在本任务新增 `login.success/login.failure`（命名可内部映射到 eventType）。
 2) 明确审计落库策略与索引策略：至少能按 `requestId` 检索并聚合。
@@ -243,6 +294,7 @@
 - [x] 是否包含结构化错误模型字段？
 - [x] 是否包含证据链要求与字段？（作为全局约束已包含；本任务不直接产出 Evidence）
 - [x] 是否包含只读默认与审批链要求？
+- [x] Doc References Updated（权威文档引用已同步）
 - [x] 是否包含 RBAC 与审计、`requestId` 贯穿要求？
 - [x] 是否包含 Schema（Zod/Pydantic）与契约对齐要求？
 - [x] 是否包含真实集成测试且不可 skip 的要求？

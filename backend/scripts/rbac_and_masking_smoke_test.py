@@ -333,12 +333,12 @@ def main() -> int:
 
         seeded = [i for i in (audit_resp_pm.get("items") or []) if i.get("resource") == "masking_smoke_seed"]
         if not seeded:
-            raise RuntimeError("Seeded audit row not found in plant_manager response")
+            raise RuntimeError("Seeded audit row not found in admin response")
         seeded_action = (seeded[0].get("actionSummary") or {})
         if seeded_action.get("unit_cost") != "[MASKED]":
-            raise RuntimeError(f"Expected unit_cost masked for plant_manager, got: {seeded_action}")
+            raise RuntimeError(f"Expected unit_cost masked for admin, got: {seeded_action}")
         if (seeded_action.get("masking") or {}).get("policyId") != "masking_default":
-            raise RuntimeError(f"Expected masking meta for plant_manager, got: {seeded_action}")
+            raise RuntimeError(f"Expected masking meta for admin, got: {seeded_action}")
 
         status, audit_resp_fin = _request_json(
             audit_url,
@@ -350,17 +350,15 @@ def main() -> int:
             },
             body=None,
         )
-        if status != 200:
-            raise RuntimeError(f"audit.events(finance) failed: status={status}, body={audit_resp_fin}")
-        _assert_audit_events_response(audit_resp_fin)
-        seeded_fin = [i for i in (audit_resp_fin.get("items") or []) if i.get("resource") == "masking_smoke_seed"]
-        if not seeded_fin:
-            raise RuntimeError("Seeded audit row not found in finance response")
-        seeded_fin_action = (seeded_fin[0].get("actionSummary") or {})
-        if seeded_fin_action.get("unit_cost") != 12.34:
-            raise RuntimeError(f"Expected unit_cost visible for finance, got: {seeded_fin_action}")
+        if status != 403:
+            raise RuntimeError(
+                f"Expected 403 for finance audit read, got status={status}, body={audit_resp_fin}"
+            )
+        _assert_error_response(audit_resp_fin)
+        if audit_resp_fin.get("code") != "FORBIDDEN":
+            raise RuntimeError(f"Expected FORBIDDEN, got: {audit_resp_fin}")
 
-        # Verify data.masked audit event exists for /audit/events when plant_manager sees masked fields.
+        # Verify data.masked audit event exists for /audit/events when admin sees masked fields.
         with engine.connect() as conn:
             conn.execute(text("SELECT set_config('app.current_tenant', :t, true)"), {"t": tenant_id})
             conn.execute(text("SELECT set_config('app.current_project', :p, true)"), {"p": project_id})

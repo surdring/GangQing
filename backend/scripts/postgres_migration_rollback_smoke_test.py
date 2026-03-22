@@ -35,16 +35,18 @@ from gangqing_db.errors import (
     MigrationFailedError,
     RollbackVerificationError,
     UpstreamUnavailableError,
+    map_db_error,
 )
 from gangqing_db.settings import load_settings
 
 VERSION_TABLE = "gangqing_alembic_version"
-EXPECTED_HEAD = "0002_metric_lineage"
+EXPECTED_HEAD = "0004_fact_enums"
 
 EXPECTED_TABLES = {
     "dim_equipment",
     "dim_material",
     "metric_lineage",
+    "metric_lineage_scenario_mapping",
     "fact_production_daily",
     "fact_energy_daily",
     "fact_cost_daily",
@@ -67,7 +69,11 @@ EXPECTED_INDEXES = {
     "idx_audit_log_scope_request_time",
     "idx_audit_log_scope_time",
     "idx_audit_log_scope_event_type_time",
+    "idx_fact_alarm_event_p0_id_unique",
+    "idx_audit_log_p0_id_unique",
     "uq_metric_lineage_scope_metric_active_unique",
+    "idx_metric_lineage_scenario_mapping_scope_metric_scenario",
+    "uq_ml_scn_map_scope_metric_scn_active_u",
 }
 
 
@@ -173,7 +179,10 @@ def _assert_schema_objects(engine: Any) -> None:
 def _assert_audit_log_append_only(engine: Any) -> None:
     """Assert audit_log is append-only (UPDATE/DELETE blocked)."""
     with engine.connect() as conn:
-        # Insert a test record
+        conn.execute(text("SELECT set_config('app.current_tenant', 't1', true)"))
+        conn.execute(text("SELECT set_config('app.current_project', 'p1', true)"))
+        conn.commit()
+
         insert_id = conn.execute(
             text(
                 """
@@ -186,31 +195,36 @@ def _assert_audit_log_append_only(engine: Any) -> None:
                 """
             )
         ).scalar_one()
-        conn.commit()
 
-        # Try UPDATE (should fail)
+        nested = conn.begin_nested()
         try:
             conn.execute(
                 text("UPDATE audit_log SET result_status='failure' WHERE id = :id"),
                 {"id": insert_id},
             )
-            conn.commit()
+            nested.commit()
             raise MigrationFailedError(
                 "validation",
                 cause="audit_log UPDATE should be blocked but it succeeded",
             )
+        except MigrationFailedError:
+            raise
         except Exception:
-            conn.rollback()
+            nested.rollback()
 
-        # Try DELETE (should fail)
+        nested = conn.begin_nested()
         try:
             conn.execute(text("DELETE FROM audit_log WHERE id = :id"), {"id": insert_id})
-            conn.commit()
+            nested.commit()
             raise MigrationFailedError(
                 "validation",
                 cause="audit_log DELETE should be blocked but it succeeded",
             )
+        except MigrationFailedError:
+            raise
         except Exception:
+            nested.rollback()
+        finally:
             conn.rollback()
 
 
@@ -343,8 +357,10 @@ def main() -> int:
         return 1
 
     except Exception as e:
-        _log_result("failed", {"error": {"code": "INTERNAL_ERROR", "message": str(e)}})
-        print(f"Internal error: {e}", file=sys.stderr)
+        mapped = map_db_error(e, request_id=request_id)
+        error_response = mapped.to_response()
+        _log_result("failed", {"error": error_response.model_dump()})
+        print(f"Error: {error_response.message}", file=sys.stderr)
         return 1
 
 

@@ -26,6 +26,7 @@
 # References
 - PRD: docs/requirements.md
 - TDD: docs/design.md
+- 架构方案: docs/GangQing 自研 AI Copilot 核心组件技术方案(架构设计版).md
 - tasks: docs/tasks.md（任务 1）
 - contracts: docs/contracts/api-and-events-draft.md
 - api docs: docs/api/openapi.yaml
@@ -38,7 +39,7 @@
 - Deliverables: 更新 `docs/contracts/api-and-events-draft.md` 中 SSE 事件章节；更新 `docs/api/openapi.yaml` 的 SSE 说明。
 
 2) Task 1.2（统一错误模型与错误码枚举）
-- Goal: 将 REST 与 SSE 的错误形态收敛为同一 `ErrorResponse/AppError`；确保 `message` 英文且可检索。
+- Goal: 将 REST 与 SSE 的错误形态收敛为同一 `ErrorResponse`；确保 `message` 英文且可检索。
 - Deliverables: 更新 `docs/contracts/api-and-events-draft.md` 错误模型与错误码；在 `docs/api/*.md` 引用并对齐。
 
 3) Task 1.3（Evidence schema 最小集合与约束）
@@ -49,11 +50,36 @@
 - Goal: 明确单元测试与冒烟测试要断言的契约点；定义“契约漂移”的阻断策略。
 - Deliverables: 在任务 1 的 Sub-task Prompts 中明确测试范围；确保 `pytest -q` 与 `backend/scripts/sse_smoke_test.py` 可作为验收依据。
 
-# Verification
-- 单元测试（必须可自动化）：
-  - `pytest -q` 覆盖：错误模型序列化、SSE 事件 schema、Evidence 最小字段与降级语义。
-- 冒烟测试（必须连真实服务）：
-  - 启动后端后运行 `backend/scripts/sse_smoke_test.py`，验证 SSE 事件序列与结构化错误事件。
+
+# Deliverables Definition（交付物定义，强制写清楚）
+- [ ] **API Contracts（权威单一事实源）**
+  - `docs/contracts/api-and-events-draft.md` 中明确：
+    - SSE Envelope：`type + envelope + payload`
+    - `envelope` 强制字段：`requestId/tenantId/projectId/sessionId/timestamp/sequence`
+    - 事件最小集合：`meta/progress/tool.call/tool.result/message.delta/evidence.update/warning/error/final`
+  - `docs/api/openapi.yaml` 中补齐 SSE 端点说明（以 contracts 为准），并声明 SSE 错误事件与 REST 错误响应同构。
+- [ ] **Error Model（统一错误模型）**
+  - 稳定错误码枚举对齐 `docs/design.md#6.2`。
+  - `message` 必须英文；必须包含 `code/message/retryable/requestId/details?`。
+- [ ] **Evidence Contract（Evidence 最小字段与降级语义）**
+  - Evidence 必填：`evidenceId/sourceSystem/sourceLocator/timeRange/confidence/validation`。
+  - Evidence 推荐：`toolCallId/lineage_version/dataQualityScore/redactions`。
+  - 降级规则：缺失 Evidence 不得输出确定性数值；需输出 `warning` 事件，并在最终答复中明确不确定。
+- [ ] **Observability & Audit（可观测与审计）**
+  - 明确审计事件类型：`query/tool.call/tool.result/response/error`。
+  - 明确 `requestId` 贯穿并可作为审计聚合 key。
+
+# Contract Drift Blocking Policy（契约漂移阻断策略，强制）
+- `docs/contracts/api-and-events-draft.md` 为对外契约单一事实源；任何实现/测试/文档与其不一致，均视为阻断问题。
+- 对外输出（REST 响应、SSE 事件、Evidence）在输出前必须完成 schema 断言。
+- schema 断言失败必须对外统一映射为 `CONTRACT_VIOLATION`（结构化 ErrorResponse；SSE 场景用 `error` 事件 payload 同构输出），并包含 `requestId`。
+
+# Verification Plan（整体验收，强制全部通过）
+- **Unit Tests（必须可自动化）**
+  - `pytest -q`
+  - `npm -C web test`
+- **Smoke Tests（必须连真实服务，不得 skip）**
+  - `backend/scripts/sse_smoke_test.py`
 
 # Output Requirement
 输出一份 Markdown 执行蓝图，覆盖：SSE 事件模型、统一错误模型、Evidence schema、对应的文件修改范围、以及单元/冒烟测试的验收口径。
@@ -76,7 +102,7 @@
   - 前端对外 I/O、SSE 事件、配置：Zod。
   - 后端对外 I/O、工具参数、Evidence、审计事件：Pydantic。
 - **结构化错误**: SSE 的 `error` 事件 payload 必须包含 `code/message/requestId/retryable/details?` 且 `message` 必须英文。
-- **RBAC + 审计 + requestId 贯穿**: SSE `meta` 或首事件必须包含 `requestId/sessionId`；错误与审计可按 `requestId` 关联。
+- **RBAC + 审计 + requestId 贯穿**: SSE 事件 Envelope 必须包含 `requestId/tenantId/projectId/sessionId/sequence`；错误与审计可按 `requestId` 关联。
 - **真实集成测试（No Skip）**: `backend/scripts/sse_smoke_test.py` 需要连真实服务，失败不得跳过。
 
 # References
@@ -86,13 +112,24 @@
 - contracts: docs/contracts/api-and-events-draft.md
 - api docs: docs/api/openapi.yaml
 
+# Target Files
+- docs/contracts/api-and-events-draft.md
+- docs/api/openapi.yaml
+- web/schemas/sseEnvelope.ts（若需要对齐命名/字段）
+- backend（实现侧仅作为后续任务参考；本子任务只落契约文档）
+
 # Execution Plan
 1) 更新 `docs/contracts/api-and-events-draft.md`：
-- 明确 SSE endpoint、事件类型最小集合（`meta/progress/tool.call/tool.result/message.delta/evidence.update/warning/error/final` 或与现有草案对齐）。
-- 明确每个事件的通用字段（至少 `requestId`；适用时 `sessionId`/`timestamp`/`type`/`payload`）。
+- 明确 SSE 顶层结构为：`type + envelope + payload`（以 design.md#3.5.1 为准）。
+- 明确 `envelope` 强制字段：`requestId/tenantId/projectId/sessionId/timestamp/sequence`。
+- 明确 `sequence` 单调递增要求与客户端丢包检测语义（只定义契约，不定义 UI 细节）。
+- 明确事件最小集合：`meta/progress/tool.call/tool.result/message.delta/evidence.update/warning/error/final`。
+- 明确 `error` 与 `warning` 的 payload 结构约束：
+  - `error` payload 与 ErrorResponse 同构（`code/message/retryable/requestId/details?`）。
+  - `warning` payload 至少包含 `code/message`（message 可中文或英文由 contracts 定义，但对后端错误 message 强制英文）。
 
 2) 更新 `docs/api/openapi.yaml`：
-- 增补对话 SSE 端点说明与事件样例（仅契约描述，不引入实现细节）。
+- 增补对话 SSE 端点说明与事件样例（仅契约描述，不引入实现细节；`final.payload` 仅 `status`，不得包含 `done`）。
 
 3) 补齐与前端渲染相关的契约点：
 - 分段渲染要求（`message.delta`）、证据增量（`evidence.update`）、错误即时可见（`error`）。
@@ -133,13 +170,23 @@
 - api docs: docs/api/semantic-api.md
 - api docs: docs/api/data-api.md
 
-# Execution Plan
-1) 更新 `docs/contracts/api-and-events-draft.md`：
-- 明确错误模型字段、错误码枚举最小集合与语义。
-- 明确 REST 错误响应与 SSE `error` 事件 payload 完全同构。
+# Target Files
+- docs/contracts/api-and-events-draft.md
+- docs/api/semantic-api.md
+- docs/api/data-api.md
+- docs/api/openapi.yaml（如有错误响应章节需要引用统一模型）
 
-2) 更新 `docs/api/*.md`：
-- 在文档中引用统一错误模型；避免出现与 contracts 不一致的字段/命名。
+ # Execution Plan
+ 1) 更新 `docs/contracts/api-and-events-draft.md`：
+ - 明确错误模型字段、错误码枚举最小集合与语义。
+ - 明确 REST 错误响应与 SSE `error` 事件 payload 完全同构。
+
+ 2) 对齐错误码枚举（以 `docs/design.md#6.2` 为准）：
+ - `VALIDATION_ERROR/AUTH_ERROR/FORBIDDEN/NOT_FOUND/UPSTREAM_TIMEOUT/UPSTREAM_UNAVAILABLE/CONTRACT_VIOLATION/GUARDRAIL_BLOCKED/EVIDENCE_MISSING/EVIDENCE_MISMATCH/INTERNAL_ERROR/SERVICE_UNAVAILABLE`
+ - 明确 `retryable` 的判定口径（例如：`UPSTREAM_TIMEOUT` 通常可重试；`FORBIDDEN` 不可重试）。
+
+ 3) 更新 `docs/api/*.md`：
+ - 在文档中引用统一错误模型；避免出现与 contracts 不一致的字段/命名。
 
 # Verification
 - **Unit**: `pytest -q` 断言错误模型序列化/反序列化一致。
@@ -174,9 +221,16 @@
 - tasks: docs/tasks.md（1.3）
 - contracts: docs/contracts/api-and-events-draft.md
 
+# Target Files
+- docs/contracts/api-and-events-draft.md
+- web/components/ContextPanel.tsx（后续对齐展示字段；本子任务不改实现）
+- web/schemas/*（后续对齐 Zod；本子任务不改实现）
+
 # Execution Plan
 1) 更新 `docs/contracts/api-and-events-draft.md` Evidence 章节：
-- 明确 Evidence 字段（`evidenceId/sourceSystem/sourceLocator/timeRange/toolCallId?/lineageVersion?/dataQualityScore?/confidence/validation/redactions?`）。
+- 明确 Evidence 字段（对齐 `docs/design.md#2.10.5`）：
+  - 必填：`evidenceId/sourceSystem/sourceLocator/timeRange/confidence/validation`
+  - 可选：`toolCallId/lineage_version/dataQualityScore/redactions`
 - 明确证据缺失/不一致/越界的 `validation` 语义与降级要求。
 
 2) 明确与 SSE `evidence.update` 的对应关系：

@@ -41,7 +41,7 @@ def login(
             (
                 settings.bootstrap_admin_user_id,
                 settings.bootstrap_admin_password,
-                "plant_manager",
+                "admin",
             )
         )
     if settings.bootstrap_finance_user_id and settings.bootstrap_finance_password:

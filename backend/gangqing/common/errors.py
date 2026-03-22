@@ -21,6 +21,13 @@ class ErrorCode(str, Enum):
     EVIDENCE_MISMATCH = "EVIDENCE_MISMATCH"
     SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # Aggregation gate error (T56.3)
+    AGGREGATION_BLOCKED = "AGGREGATION_BLOCKED"
+    # Configuration errors (Task 43)
+    CONFIG_MISSING = "CONFIG_MISSING"
+    CONFIG_INVALID = "CONFIG_INVALID"
+    CONFIG_TYPE_ERROR = "CONFIG_TYPE_ERROR"
+    CONFIG_DEPRECATED = "CONFIG_DEPRECATED"
 
 
 class ErrorResponse(BaseModel):
@@ -66,6 +73,8 @@ def build_validation_error(
     message: str = "Invalid tool parameters",
     error: ValidationError,
     max_field_errors: int = 20,
+    stage: str = "tool.params.validate",
+    tool_name: str | None = None,
 ) -> AppError:
     field_errors: list[dict[str, str]] = []
     for item in error.errors():
@@ -76,15 +85,18 @@ def build_validation_error(
             path = str(loc) if loc is not None else ""
 
         reason = str(item.get("msg") or "Invalid value")
+        error_type = str(item.get("type") or "validation_error")
         if path:
-            field_errors.append({"path": path, "reason": reason})
+            field_errors.append({"path": path, "reason": reason, "error_type": error_type})
         else:
-            field_errors.append({"path": "__root__", "reason": reason})
+            field_errors.append({"path": "__root__", "reason": reason, "error_type": error_type})
 
         if len(field_errors) >= max_field_errors:
             break
 
     details: dict[str, Any] = {
+        "stage": stage,
+        "toolName": tool_name,
         "fieldErrors": field_errors,
         "errorCount": len(error.errors()),
     }
@@ -105,6 +117,8 @@ def build_contract_violation_error(
     error: ValidationError,
     source: str,
     max_field_errors: int = 20,
+    stage: str = "tool.output.validate",
+    tool_name: str | None = None,
 ) -> AppError:
     field_errors: list[dict[str, str]] = []
     for item in error.errors():
@@ -115,12 +129,17 @@ def build_contract_violation_error(
             path = str(loc) if loc is not None else ""
 
         reason = str(item.get("msg") or "Invalid value")
-        field_errors.append({"path": path or "__root__", "reason": reason})
+        error_type = str(item.get("type") or "validation_error")
+        field_errors.append(
+            {"path": path or "__root__", "reason": reason, "error_type": error_type}
+        )
         if len(field_errors) >= max_field_errors:
             break
 
     details: dict[str, Any] = {
         "source": source,
+        "stage": stage,
+        "toolName": tool_name,
         "fieldErrors": field_errors,
         "errorCount": len(error.errors()),
     }

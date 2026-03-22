@@ -19,6 +19,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 
 # Add backend to path for imports
@@ -37,7 +38,16 @@ from gangqing_db.metric_lineage import (
 from gangqing_db.settings import load_settings
 
 
-EXPECTED_HEAD = "0003_ml_scn_map"
+def _get_expected_head(cfg: Config) -> str:
+    script = ScriptDirectory.from_config(cfg)
+    head = script.get_current_head()
+    if not head:
+        raise MigrationFailedError(
+            "upgrade",
+            version=None,
+            cause="Unable to resolve alembic head revision",
+        )
+    return head
 
 
 def _require_database_url() -> str:
@@ -188,6 +198,7 @@ def main() -> int:
     try:
         database_url = _require_database_url()
         cfg = _build_alembic_config()
+        expected_head = _get_expected_head(cfg)
 
         engine = create_engine(database_url, pool_pre_ping=True)
         try:
@@ -198,11 +209,11 @@ def main() -> int:
 
         command.upgrade(cfg, "head")
         version = _get_current_version(engine)
-        if version != EXPECTED_HEAD:
+        if version != expected_head:
             raise MigrationFailedError(
                 "upgrade",
                 version=version,
-                cause=f"Expected version {EXPECTED_HEAD}, got {version}",
+                cause=f"Expected version {expected_head}, got {version}",
                 request_id=request_id,
             )
 
@@ -219,7 +230,7 @@ def main() -> int:
             request_id=request_id,
             tenant_id=tenant_id,
             project_id=project_id,
-            capabilities={"metric_lineage:read"},
+            capabilities={"metric:lineage:read"},
         )
 
         rec = get_metric_lineage(
@@ -263,6 +274,16 @@ def main() -> int:
             er = e.to_response()
             if er.code != "EVIDENCE_MISMATCH":
                 raise RuntimeError("Unexpected error code for missing lineageVersion")
+            if not isinstance(er.message, str) or not er.message.isascii():
+                raise RuntimeError("Expected english error message for missing lineageVersion")
+            if er.request_id != request_id:
+                raise RuntimeError("Expected requestId to be preserved in error response")
+            if er.retryable is not False:
+                raise RuntimeError("Expected retryable=false for missing lineageVersion")
+            if not isinstance(er.details, dict):
+                raise RuntimeError("Expected details to be a dict for missing lineageVersion")
+            if er.details.get("reason") != "lineage_version_required":
+                raise RuntimeError("Expected details.reason=lineage_version_required")
 
         rec3, _, evidence3 = bind_metric_lineage_for_computation(
             MetricLineageBindingRequest(
@@ -278,6 +299,15 @@ def main() -> int:
         )
         if rec3.lineage_version != "1.0.0" or evidence3.lineage_version != "1.0.0":
             raise RuntimeError("Unexpected lineageVersion resolved by scenarioKey")
+        dumped_evidence3 = evidence3.model_dump(by_alias=True)
+        if dumped_evidence3.get("lineageVersion") != "1.0.0":
+            raise RuntimeError("Evidence must include lineageVersion")
+        if not isinstance(dumped_evidence3.get("sourceLocator"), dict):
+            raise RuntimeError("Evidence must include sourceLocator")
+        if not isinstance(dumped_evidence3.get("timeRange"), dict):
+            raise RuntimeError("Evidence must include timeRange")
+        if dumped_evidence3["timeRange"]["end"] <= dumped_evidence3["timeRange"]["start"]:
+            raise RuntimeError("Evidence timeRange.end must be greater than timeRange.start")
 
         try:
             bind_metric_lineage_for_computation(
@@ -298,6 +328,16 @@ def main() -> int:
             er = e.to_response()
             if er.code != "EVIDENCE_MISMATCH":
                 raise RuntimeError("Unexpected error code for deprecated lineageVersion")
+            if not isinstance(er.message, str) or not er.message.isascii():
+                raise RuntimeError("Expected english error message for deprecated lineageVersion")
+            if er.request_id != request_id:
+                raise RuntimeError("Expected requestId to be preserved in deprecated error response")
+            if er.retryable is not False:
+                raise RuntimeError("Expected retryable=false for deprecated lineageVersion")
+            if not isinstance(er.details, dict):
+                raise RuntimeError("Expected details to be a dict for deprecated lineageVersion")
+            if er.details.get("reason") != "lineage_version_deprecated":
+                raise RuntimeError("Expected details.reason=lineage_version_deprecated")
 
         print("metric_lineage_smoke_test: PASS")
         return 0

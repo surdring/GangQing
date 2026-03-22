@@ -49,6 +49,52 @@ def test_missing_scope_in_ctx_raises_auth_error() -> None:
     assert e.value.code == ErrorCode.AUTH_ERROR
 
 
+def test_partial_scope_params_is_auth_error() -> None:
+    ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="plant_manager")
+
+    tool = PostgresReadOnlyQueryTool(execute_fn=lambda **_: [])
+    params = PostgresReadOnlyQueryParams(
+        tenantId="t1",
+        projectId=None,
+        templateId="production_daily",
+        timeRange=_make_timerange(),
+    )
+
+    with pytest.raises(AppError) as e:
+        tool.run(ctx=ctx, params=params)
+    assert e.value.code == ErrorCode.AUTH_ERROR
+
+
+def test_slow_template_does_not_expose_sleep_field() -> None:
+    def _return_rows(**_):
+        return [
+            {
+                "tenant_id": "t1",
+                "project_id": "p1",
+                "__sleep": None,
+                "business_date": datetime(2026, 2, 1, tzinfo=timezone.utc).date(),
+                "equipment_id": None,
+                "quantity": 1,
+                "unit": "kg",
+                "source_system": "test",
+                "source_record_id": "r1",
+                "time_start": datetime(2026, 2, 1, tzinfo=timezone.utc),
+                "time_end": datetime(2026, 2, 2, tzinfo=timezone.utc),
+                "extracted_at": datetime(2026, 2, 2, tzinfo=timezone.utc),
+            }
+        ]
+
+    ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="plant_manager")
+    tool = PostgresReadOnlyQueryTool(execute_fn=_return_rows)
+    params = PostgresReadOnlyQueryParams(templateId="production_daily_slow", timeRange=_make_timerange())
+
+    result = tool.run(ctx=ctx, params=params)
+    assert result.row_count == 1
+    assert result.rows
+    assert "__sleep" not in result.rows[0]
+    assert result.evidence.evidence_id
+
+
 def test_evidence_has_required_fields_and_no_secret_leakage() -> None:
     captured: list[dict] = []
 
@@ -116,6 +162,45 @@ def test_evidence_has_required_fields_and_no_secret_leakage() -> None:
     assert args_summary.get("templateId") == "production_daily"
     assert args_summary.get("queryFingerprint")
     assert isinstance(success_events[-1]["evidence_refs"], list)
+
+
+def test_evidence_source_locator_is_masked_by_default() -> None:
+    def _return_rows(**_):
+        return [
+            {
+                "tenant_id": "t1",
+                "project_id": "p1",
+                "business_date": datetime(2026, 2, 1, tzinfo=timezone.utc).date(),
+                "equipment_id": None,
+                "quantity": 1,
+                "unit": "kg",
+                "source_system": "test",
+                "source_record_id": "r1",
+                "time_start": datetime(2026, 2, 1, tzinfo=timezone.utc),
+                "time_end": datetime(2026, 2, 2, tzinfo=timezone.utc),
+                "extracted_at": datetime(2026, 2, 2, tzinfo=timezone.utc),
+            }
+        ]
+
+    ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="plant_manager")
+    tool = PostgresReadOnlyQueryTool(execute_fn=_return_rows)
+    params = PostgresReadOnlyQueryParams(templateId="production_daily", timeRange=_make_timerange())
+
+    result = tool.run(ctx=ctx, params=params)
+    locator = result.evidence.source_locator
+    assert locator.get("filters") is not None
+    filters = locator.get("filters")
+    assert isinstance(filters, list)
+    locator_str = json.dumps(locator, ensure_ascii=False, sort_keys=True)
+    assert "unit_cost" not in locator_str
+    assert "12.34" not in locator_str
+    if result.evidence.redactions is not None:
+        assert isinstance(result.evidence.redactions, dict)
+        masking = (result.evidence.redactions or {}).get("masking")
+        assert isinstance(masking, dict)
+        assert masking.get("policyId")
+        assert masking.get("version")
+        assert isinstance(masking.get("maskedKeys"), list)
 
 
 def test_params_boundaries_limit_and_offset() -> None:
@@ -234,10 +319,29 @@ def test_invalid_template_id_is_validation_error() -> None:
 def test_forbidden_when_role_missing() -> None:
     ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role=None)
     tool = PostgresReadOnlyQueryTool(execute_fn=lambda **_: [])
+
+    with pytest.raises(AppError) as e:
+        tool.run_raw(
+            ctx=ctx,
+            raw_params={
+                "templateId": "production_daily",
+                "timeRange": {
+                    "start": datetime(2026, 2, 1, tzinfo=timezone.utc),
+                    "end": datetime(2026, 2, 2, tzinfo=timezone.utc),
+                },
+            },
+        )
+    assert e.value.code == ErrorCode.FORBIDDEN
+
+
+def test_run_direct_call_enforces_capability() -> None:
+    ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="dispatcher")
+    tool = PostgresReadOnlyQueryTool(execute_fn=lambda **_: [])
     params = PostgresReadOnlyQueryParams(templateId="production_daily", timeRange=_make_timerange())
 
     with pytest.raises(AppError) as e:
         tool.run(ctx=ctx, params=params)
+
     assert e.value.code == ErrorCode.FORBIDDEN
 
 
@@ -278,10 +382,18 @@ def test_output_contract_violation_is_mapped_to_contract_violation() -> None:
 
         ctx = RequestContext(requestId="r1", tenantId="t1", projectId="p1", role="plant_manager")
         tool = PostgresReadOnlyQueryTool(execute_fn=_return_rows)
-        params = PostgresReadOnlyQueryParams(templateId="production_daily", timeRange=_make_timerange())
 
         with pytest.raises(AppError) as e:
-            tool.run(ctx=ctx, params=params)
+            tool.run_raw(
+                ctx=ctx,
+                raw_params={
+                    "templateId": "production_daily",
+                    "timeRange": {
+                        "start": datetime(2026, 2, 1, tzinfo=timezone.utc),
+                        "end": datetime(2026, 2, 2, tzinfo=timezone.utc),
+                    },
+                },
+            )
 
         assert e.value.code == ErrorCode.CONTRACT_VIOLATION
         assert e.value.request_id == "r1"
@@ -290,7 +402,14 @@ def test_output_contract_violation_is_mapped_to_contract_violation() -> None:
         assert e.value.retryable is False
         assert isinstance(e.value.details, dict)
         assert e.value.details.get("source") == "tool.postgres_readonly.result"
+        assert e.value.details.get("stage") == "tool.output.validate"
+        assert e.value.details.get("toolName") == "postgres_readonly_query"
         assert "fieldErrors" in (e.value.details or {})
+        field_errors = (e.value.details or {}).get("fieldErrors")
+        assert isinstance(field_errors, list)
+        assert field_errors
+        assert isinstance(field_errors[0], dict)
+        assert isinstance(field_errors[0].get("error_type"), str)
     finally:
         if original is None:
             os.environ.pop("GANGQING_FORCE_POSTGRES_TOOL_OUTPUT_CONTRACT_VIOLATION", None)

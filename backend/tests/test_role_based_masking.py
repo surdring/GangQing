@@ -44,6 +44,25 @@ def test_masking_finance_allows_finance_fields() -> None:
         policy=policy,
     )
 
+    assert masked["unit_cost"] == "[MASKED]"
+    assert masked["total_cost"] == "[MASKED]"
+    assert masked["safe"] == "v"
+    assert meta is not None
+
+
+def test_masking_can_unmask_allows_sensitive_fields() -> None:
+    policy = build_default_masking_policy()
+    masked, meta = apply_role_based_masking(
+        {
+            "unit_cost": 12.34,
+            "total_cost": 99.9,
+            "safe": "v",
+        },
+        role="finance",
+        can_unmask=True,
+        policy=policy,
+    )
+
     assert masked["unit_cost"] == 12.34
     assert masked["total_cost"] == 99.9
     assert masked["safe"] == "v"
@@ -125,6 +144,13 @@ def test_masking_domain_allow_allows_finance_domain() -> None:
     masked_fin, meta_fin = apply_role_based_masking({"unit_cost": 10}, role="finance", policy=policy)
     assert masked_fin["unit_cost"] == 10
     assert meta_fin is None
+
+
+def test_masking_default_policy_masks_finance_without_unmask_permission() -> None:
+    policy = build_default_masking_policy()
+    masked_fin, meta_fin = apply_role_based_masking({"unit_cost": 10}, role="finance", policy=policy)
+    assert masked_fin["unit_cost"] == "[MASKED]"
+    assert meta_fin is not None
 
 
 def test_masking_compile_cache_hits() -> None:

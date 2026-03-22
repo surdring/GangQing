@@ -42,7 +42,7 @@
 - TDD: docs/design.md（2.5.2/2.9/3.3/6.1/6.3）
 - tasks: docs/tasks.md（任务 8）
 - contracts: docs/contracts/api-and-events-draft.md
-- env: .env.example（GANGQING_DATABASE_URL 及隔离/脱敏相关配置）
+- env: .env.example（GANGQING_DATABASE_URL 及超时/重试/审计相关配置）
 
 # 权威参考文档/约束来源（强制）
 - docs/requirements.md（“Postgres 查询工具”验收标准：仅 SELECT + RBAC/scope + Evidence + 超时映射）
@@ -79,12 +79,23 @@
   - Evidence 的 source locator：使用 `table/view + time_range + filters + query_fingerprint`，避免原 SQL 泄露。
   - 审计事件字段：至少包含 `requestId/tenantId/projectId/sessionId/userId/role/toolName/durationMs/result/errorCode/evidenceRefs`。
 
+# Deliverables Definition (交付物定义)
+- [ ] **Directory Structure**: 明确本任务涉及的工具实现、模板注册表、DB 执行层、隔离/RBAC/audit 复用模块的文件路径。
+- [ ] **Environment Variables**: 列出本任务依赖的 ENV（至少 `GANGQING_DATABASE_URL`），并说明缺失时的失败策略（必须失败，英文错误）。
+- [ ] **Tool Contracts (Pydantic)**:
+  - `PostgresReadOnlyQueryParams` 输入 schema（包含 `templateId/timeRange/filters/orderBy/limit/offset/timeoutSeconds` 以及 scope 注入规则）。
+  - `PostgresReadOnlyQueryResult` 输出 schema（包含 `rows/rowCount/queryFingerprint/evidence/toolCallId`）。
+- [ ] **Error Model**: 明确本工具会返回的错误码（`VALIDATION_ERROR/FORBIDDEN/AUTH_ERROR/CONTRACT_VIOLATION/UPSTREAM_TIMEOUT/UPSTREAM_UNAVAILABLE/INTERNAL_ERROR`），并声明 `message` 必须英文。
+- [ ] **Auth & RBAC**: capability 口径（建议以代码为准，例如 `tool:postgres:read`）；拒绝时必须审计。
+- [ ] **Isolation (tenantId/projectId)**: scope 注入/显式校验规则、跨域拒绝与二次校验（row-level cross-scope data hit detection）。
+- [ ] **Evidence Contract**: Evidence 必填字段与禁止泄露项（不得包含连接串/完整 SQL/密钥）。
+- [ ] **Observability & Audit**: `requestId` 贯穿与 tool call 审计字段口径。
+
 # Verification
 - Automated Tests:
   - Unit: `pytest -q`
   - Smoke（真实 Postgres）:
-    - `python backend/scripts/postgres_schema_smoke_test.py`
-    - `python backend/scripts/postgres_tool_smoke_test.py`（本任务拟新增，用于验证只读查询工具端到端链路）
+    - `python backend/scripts/postgres_tool_smoke_test.py`
 - Failure Policy（强制）:
   - 若缺少 `GANGQING_DATABASE_URL`：必须失败并输出清晰英文错误。
   - 若 Postgres 不可达：必须失败并映射为 `UPSTREAM_UNAVAILABLE`（或脚本返回非零退出码）。
@@ -116,15 +127,17 @@
 - env: .env.example（GANGQING_DATABASE_URL）
 
 # Target Files
-- backend/gangqing/tools/*（新增 Postgres 工具模块的落点目录，以仓库实际工具组织为准）
-- backend/gangqing/common/context.py（RequestContext 与 scope headers 约束，用于对齐工具调用上下文）
-- backend/gangqing/common/rbac.py（capability 命名规则与拒绝策略，用于对齐工具 capability 约束）
-- backend/gangqing/tools/isolation.py（scope 解析与跨域拒绝，用于复用）
-- backend/gangqing_db/settings.py（数据库配置加载与 `.env.local` 读取）
-- backend/gangqing_db/errors.py（DB 错误映射到结构化错误码）
-- backend/gangqing_db/audit_log.py（审计事件落库，参数脱敏）
-- backend/scripts/postgres_tool_smoke_test.py（拟新增：真实 Postgres 冒烟脚本）
-- backend/tests/*（新增/更新单元测试文件，覆盖只读/越权/超时等边界）
+- backend/gangqing/tools/postgres_readonly.py（工具参数/结果 schema + 模板化查询拼装 + Evidence 生成）
+- backend/gangqing/tools/postgres_templates.py（模板注册表：templateId -> base_select_sql/白名单字段/暴露字段）
+- backend/gangqing/tools/isolation.py（scope 注入与跨域拒绝/二次校验复用）
+- backend/gangqing/tools/runner.py（统一 Params/Result 校验、RBAC、重试与输出契约校验）
+- backend/gangqing/common/context.py（RequestContext：requestId/tenantId/projectId 注入约束）
+- backend/gangqing/common/audit.py（tool call 审计事件写入封装）
+- backend/gangqing/tools/rbac.py（工具级 capability 校验与 RBAC_DENIED 审计）
+- backend/gangqing_db/postgres_query.py（只读事务 + statement_timeout + set_config scope 上下文）
+- backend/gangqing_db/settings.py（DB settings：`GANGQING_DATABASE_URL` 校验与 `.env.local` 读取）
+- backend/tests/test_postgres_tool_readonly.py（单元测试：Evidence 字段/不泄露/只读门禁/错误映射）
+- backend/scripts/postgres_tool_smoke_test.py（真实 Postgres 冒烟：migrate + seed + tool.run + audit_log 验证）
 
 # Execution Plan
 1) 定义工具参数 Pydantic schema。
@@ -276,11 +289,12 @@
  - env: .env.example（审计异步开关/脱敏配置等，如适用）
  
  # Target Files
- - backend/gangqing_db/audit_log.py（审计事件落库与参数脱敏）
- - backend/gangqing_db/audit_query.py（审计查询模型与字段口径参考）
- - backend/gangqing_db/errors.py（错误映射与英文 message）
- - backend/tests/*（新增/更新单元测试：Evidence 与审计字段完整性）
- - backend/scripts/postgres_tool_smoke_test.py（拟新增：真实 Postgres 冒烟，验证 Evidence+审计）
+ - backend/gangqing/tools/postgres_readonly.py（Evidence 生成与脱敏策略接入、审计 evidenceRefs 绑定）
+ - backend/gangqing/common/audit.py（tool call 审计写入）
+ - backend/gangqing/common/settings.py（审计异步开关与工具默认超时配置）
+ - backend/gangqing_db/audit_log.py（审计事件落库与表结构口径）
+ - backend/tests/test_postgres_tool_readonly.py（单元测试：Evidence 字段完整性、不泄露、审计写入调用）
+ - backend/scripts/postgres_tool_smoke_test.py（真实 Postgres 冒烟：验证 Evidence+审计）
  
  # Execution Plan
  1) 定义 Evidence 结构与最小字段集

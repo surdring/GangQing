@@ -68,10 +68,28 @@
 - `statusCode`、`durationMs`（API 响应摘要）
 - 结构化原因（例如 `details.reason`、`details.header`），但不得包含任何凭证原文
 
+### 4.2.1 `actionSummary/argsSummary` 建议字段白名单（推荐）
+
+| 场景 | 允许记录字段（建议） | 说明 |
+| --- | --- | --- |
+| `auth.denied` | `method`、`path`、`details.header`、`details.reason` | 禁止记录 `Authorization` 原文或任何 token 片段 |
+| `rbac.denied` | `capability`、`role`、`details.reason` | `capability` 必须可检索；`role` 允许为空 |
+| `tool_call` | `toolName`、`argsSummary`（脱敏后）、`durationMs`、`stage` | `argsSummary` 必须脱敏；不得包含原始 SQL/rows |
+| `api.response` | `method`、`path`、`statusCode`、`durationMs` | 不记录请求体/响应体原文；仅摘要 |
+
+> 说明：上述为“建议白名单”，实际实现可有少量扩展，但必须满足本节的“禁止字段/脱敏策略”。
+
 ### 4.3 脱敏策略
 - `actionSummary` 与工具 `argsSummary` 必须经过脱敏：
   - 对 key 命中 `password/secret/token/api_key/authorization/cookie` 等片段的字段统一替换为 `[REDACTED]`
   - 递归处理嵌套对象与数组
+
+### 4.4 禁止内容（补充）
+
+除 4.1 列表外，审计事件中禁止记录：
+- 原始 SQL 文本（例如包含 `SELECT ...`）
+- 全量结果集/rows 明细
+- 异常堆栈（stacktrace）与内部错误对象的 repr
 
 ## 5. 与对外错误模型的关联（Correlation）
 

@@ -5,6 +5,24 @@ from gangqing.common.errors import AppError, ErrorCode
 from gangqing.common.metrics import METRICS
 
 
+SCOPE_POLICY_VERSION = "v1"
+
+
+def build_scope_filter_summary(
+    *,
+    tenant_id: str | None,
+    project_id: str | None,
+    mode: str,
+    policy_version: str = SCOPE_POLICY_VERSION,
+) -> dict[str, Any]:
+    return {
+        "tenantId": tenant_id,
+        "projectId": project_id,
+        "mode": mode,
+        "policyVersion": policy_version,
+    }
+
+
 def resolve_scope(
     *,
     ctx: Any,

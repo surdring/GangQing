@@ -197,5 +197,6 @@ Thumbs.db
 
 # Project specific
 reports/
+!reports/*.md
 *.zip
 gangqing---*.zip

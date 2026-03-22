@@ -28,6 +28,7 @@ from gangqing_db.errors import (
     MigrationError,
     RollbackVerificationError,
     UpstreamUnavailableError,
+    map_db_error,
 )
 
 
@@ -147,6 +148,27 @@ class TestUpstreamUnavailableError:
         assert error.code == ErrorCode.UPSTREAM_UNAVAILABLE
         assert error.details == {"service": "ERP"}
         assert error.retryable is True
+
+
+class TestDbStatementTimeoutMapping:
+    def test_pg_statement_timeout_is_mapped_to_upstream_timeout(self) -> None:
+        from sqlalchemy.exc import DBAPIError
+
+        class _Orig(Exception):
+            pgcode = "57014"
+
+        db_err = DBAPIError(
+            statement="SELECT pg_sleep(1)",
+            params={},
+            orig=_Orig("canceling statement due to statement timeout"),
+            connection_invalidated=False,
+        )
+
+        err = map_db_error(db_err, request_id="r1")
+        assert err.code == ErrorCode.UPSTREAM_TIMEOUT
+        assert err.retryable is True
+        assert err.request_id == "r1"
+        assert err.message.isascii()
 
 
 class TestMigrationFailedError:

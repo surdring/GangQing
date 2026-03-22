@@ -8,6 +8,17 @@
 - **脱敏**：审计中的参数必须做摘要与脱敏，禁止写入敏感原文（如配方、成本明细全量、密钥）。
 - **可关联**：必须包含 `requestId`，并在可用时包含 `tenantId/projectId/sessionId/taskId/stepId/toolName`。
 
+## 0.1 权威实现对齐（Single Source of Truth）
+
+- 审计事件写入与落库 schema（后端权威）：
+  - `backend/gangqing/common/audit.py`
+  - `backend/gangqing_db/audit_log.py::AuditLogEvent`
+- 结构化日志（后端权威）：
+  - `backend/gangqing/common/logging.py`
+  - `backend/gangqing/common/redaction.py`
+- RequestContext（后端权威）：
+  - `backend/gangqing/common/context.py::RequestContext`
+
 ## 1. 事件类型（最小集合）
 - `query`
   - 用户发起查询、对话、检索等只读行为
@@ -19,18 +30,37 @@
   - 实际写入/下发/执行/回滚
 
 ## 2. 审计事件字段（最小闭环）
-必须字段：
-- `event_id`：事件唯一 ID
-- `ts`：UTC 时间戳（ISO8601）
+本仓库当前落库审计事件字段以 `AuditLogEvent` 为准（JSON key 采用 camelCase）。
+
+必须字段（落库强制）：
+- `eventType`
+- `timestamp`（UTC，ISO8601）
 - `requestId`
-- `action_type`：见事件类型
+- `tenantId`
+- `projectId`
+- `result`：`success | failure`
 
 强烈建议字段：
-- `tenantId` / `projectId`
-- `user_id` / `role`
+- `sessionId`
+- `userId` / `role`
 - `resource`：如 API path、工具名、审批单号、执行对象
-- `parameters`：结构化参数摘要（必须脱敏）
-- `result`：结构化结果摘要（成功/失败、错误码、影响范围）
+- `actionSummary`：结构化参数摘要（必须脱敏）
+- `errorCode`
+- `evidenceRefs`
+
+说明：
+- `actionSummary` 必须只包含“脱敏后的摘要”，不得写入敏感原文。
+- `tenantId/projectId` 缺失视为隔离失败，应在网关层拒绝并产生审计（失败）。
+
+## 2.1 审计事件与 RequestContext 字段对齐
+
+从 `RequestContext` 到 `AuditLogEvent` 的字段映射：
+- `ctx.request_id` -> `requestId`
+- `ctx.tenant_id` -> `tenantId`
+- `ctx.project_id` -> `projectId`
+- `ctx.session_id` -> `sessionId`
+- `ctx.user_id` -> `userId`
+- `ctx.role` -> `role`
 
 ## 3. 脱敏与参数摘要规则
 - **禁止**写入：密码、JWT、API Key、配方全量、财务原始单据全量、OT 点位写入明文（可写摘要）。
@@ -39,12 +69,49 @@
   - 区间化数值（如 `cost_per_ton_range: 2800-2900`）
   - 资源标识（如设备统一 ID）
 
+落地要求（后端实现对齐）：
+- 日志与审计共用递归脱敏能力：`backend/gangqing/common/redaction.py::redact_sensitive`
+- 默认敏感 key 片段（大小写不敏感，命中即替换为 `[REDACTED]`）：
+  - `password/passwd/secret/token/api_key/apikey/authorization/cookie/set-cookie`
+- 可通过环境变量扩展敏感 key 片段：
+  - `GANGQING_REDACTION_SENSITIVE_KEY_FRAGMENTS`（逗号分隔）
+
 ## 4. 错误与失败审计
 - 认证/鉴权失败必须审计（含目标资源与失败原因摘要）。
 - 工具调用失败必须审计：
   - `code`（如 `UPSTREAM_TIMEOUT/UPSTREAM_UNAVAILABLE`）
   - `retryable`
   - `toolName`
+
+实现对齐：
+- API 网关层在请求结束时写 `eventType=api_response`，并在失败时带 `errorCode`。
+- 鉴权拒绝写 `eventType=auth_denied`。
+- 工具调用写 `eventType=tool_call`，`resource` 使用 `toolName`，`actionSummary.argsSummary` 为脱敏摘要。
+
+## 4.1 结构化日志字段（JSON）最小集合
+
+日志输出以 JSON 为主（建议生产 `json`，本地可 `console`）。最小字段集合：
+- `timestamp`
+- `level`
+- `event`（或等价字段，用于检索，例如 `http_request`）
+- `requestId`
+- `tenantId`
+- `projectId`
+- `sessionId`（可用时）
+- `userId`（可用时）
+- `role`（可用时）
+- `taskId`（可用时）
+- `stepId`（可用时）
+
+可观测扩展字段（推荐）：
+- `toolName`（工具日志）
+- `durationMs`
+- `status_code` / `statusCode`
+- `errorCode` / `error`
+
+约束：
+- 日志中的对外错误 `message` 必须英文（便于检索）；日志事件名可中文或英文，但建议英文事件名。
+- 日志/审计不得包含敏感原文，所有 payload 需在 processor 中执行递归脱敏。
 
 ## 5. 存储与检索（实现建议）
 - PoC/试点阶段可先写入 SQLite/PostgreSQL。

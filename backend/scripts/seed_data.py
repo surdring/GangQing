@@ -12,11 +12,11 @@ Usage:
 
 from __future__ import annotations
 
+import calendar
 import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -74,11 +74,12 @@ class SeedConfig(BaseModel):
     edge_cases: SeedEdgeCasesConfig
 
 
-@dataclass(frozen=True)
-class EdgeEvidenceRef:
-    edge_type: str
-    table: str
-    primary_key: str
+class EdgeEvidenceRef(BaseModel):
+    edge_type: str = Field(min_length=1)
+    dataset_version: str = Field(min_length=1, max_length=64)
+    table: str = Field(min_length=1)
+    primary_key: str = Field(min_length=1)
+    natural_key: str | None = None
     time_range: dict[str, str | None]
     business_date: str | None = None
 
@@ -128,6 +129,15 @@ def _parse_date(value: str) -> date:
         return date.fromisoformat(value)
     except Exception as e:
         raise ValidationError("Invalid date format, expected YYYY-MM-DD", details={"value": value}) from e
+
+
+def _parse_bool_cli(value: str) -> bool:
+    v = (value or "").strip().lower()
+    if v in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if v in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("Invalid boolean value")
 
 
 def _build_params(args: argparse.Namespace) -> SeedConfig:
@@ -463,7 +473,10 @@ def generate_seed_payload(params: SeedConfig) -> dict[str, list[dict[str, Any]]]
                 )
 
                 if day_offset == idx_duplicate_day and j == 0 and eq_index == 0 and duplicate_alarm_extra > 0:
-                    for k in range(duplicate_alarm_extra):
+                    duplicate_natural_key = (
+                        f"{dataset_version}:edge:duplicate:alarm:{business_date.isoformat()}:{eq_index}:{j}"
+                    )
+                    for k in range(params.edge_cases.duplicate_count):
                         alarm_rows.append(
                             {
                                 "tenant_id": params.tenant_id,
@@ -474,10 +487,38 @@ def generate_seed_payload(params: SeedConfig) -> dict[str, list[dict[str, Any]]]
                                 "severity": rng.choice(["low", "medium", "high"]),
                                 "message": "seed alarm duplicate",
                                 "source_system": "seed",
-                                "source_record_id": f"{dataset_version}:edge:duplicate:alarm:{business_date.isoformat()}:{eq_index}:{j}:{k}",
+                                "source_record_id": duplicate_natural_key,
                                 "created_at": event_time.isoformat(),
                             }
                         )
+
+    if params.edge_cases.delay_enabled and params.edge_cases.delay_count > 0:
+        month_end_day = calendar.monthrange(params.start_date.year, params.start_date.month)[1]
+        month_end_date = date(params.start_date.year, params.start_date.month, month_end_day)
+        event_time = datetime(
+            year=month_end_date.year,
+            month=month_end_date.month,
+            day=month_end_date.day,
+            hour=23,
+            minute=0,
+            second=0,
+            tzinfo=timezone.utc,
+        )
+        created_at = event_time + timedelta(hours=_DELAY_ALARM_CREATED_AT_HOURS)
+        alarm_rows.append(
+            {
+                "tenant_id": params.tenant_id,
+                "project_id": params.project_id,
+                "event_time": event_time.isoformat(),
+                "unified_equipment_id": "EQ-001",
+                "alarm_code": "AL-999",
+                "severity": "high",
+                "message": "seed alarm delay cross month",
+                "source_system": "seed",
+                "source_record_id": f"{dataset_version}:edge:delay:cross_month:alarm:{month_end_date.isoformat()}",
+                "created_at": created_at.isoformat(),
+            }
+        )
 
     # Workorders (some closed, some open)
     base_time = datetime.combine(params.start_date, datetime.min.time(), tzinfo=timezone.utc)
@@ -491,7 +532,7 @@ def generate_seed_payload(params: SeedConfig) -> dict[str, list[dict[str, Any]]]
             {
                 "tenant_id": params.tenant_id,
                 "project_id": params.project_id,
-                "workorder_no": f"WO-{i+1:05d}",
+                "workorder_no": f"{dataset_version}-WO-{i+1:05d}",
                 "unified_equipment_id": unified_equipment_id,
                 "status": "closed" if closed else "open",
                 "created_time": created_time.isoformat(),
@@ -824,8 +865,10 @@ def seed_database(*, database_url: str, params: SeedConfig, cleanup_before_inser
                 inserted_rows = 0
                 for i in range(0, total, batch_size):
                     batch = prepared[i : i + batch_size]
-                    conn.execute(sql, batch)
-                    inserted_rows += len(batch)
+                    result = conn.execute(sql, batch)
+                    rowcount = getattr(result, "rowcount", None)
+                    if rowcount is not None and rowcount >= 0:
+                        inserted_rows += int(rowcount)
                     _log_progress(table=table, inserted_rows=inserted_rows, total_rows=total)
 
                 inserted[table] = inserted_rows
@@ -865,8 +908,10 @@ def seed_database(*, database_url: str, params: SeedConfig, cleanup_before_inser
                 evidence.append(
                     EdgeEvidenceRef(
                         edge_type=edge_type,
+                        dataset_version=params.edge_cases.dataset_version,
                         table="fact_production_daily",
                         primary_key=row[0],
+                        natural_key=src,
                         business_date=row[2],
                         time_range={"time_start": row[3], "time_end": row[4], "extracted_at": row[5]},
                     )
@@ -895,8 +940,10 @@ def seed_database(*, database_url: str, params: SeedConfig, cleanup_before_inser
                 evidence.append(
                     EdgeEvidenceRef(
                         edge_type=edge_type,
+                        dataset_version=params.edge_cases.dataset_version,
                         table="fact_alarm_event",
                         primary_key=row[0],
+                        natural_key=src,
                         time_range={"event_time": row[2], "created_at": row[3]},
                     )
                 )
@@ -924,25 +971,138 @@ def seed_database(*, database_url: str, params: SeedConfig, cleanup_before_inser
                 evidence.append(
                     EdgeEvidenceRef(
                         edge_type=edge_type,
+                        dataset_version=params.edge_cases.dataset_version,
                         table="fact_energy_daily",
                         primary_key=row[0],
+                        natural_key=src,
                         business_date=row[2],
                         time_range={"time_start": row[3], "time_end": row[4], "extracted_at": row[5]},
                     )
                 )
 
+            dataset_prefix_all = f"{params.edge_cases.dataset_version}:"
+            written_counts = {
+                "dim_equipment": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM dim_equipment
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                          AND source_record_id LIKE :prefix
+                        """
+                    ),
+                    {
+                        "tenant_id": params.tenant_id,
+                        "project_id": params.project_id,
+                        "prefix": dataset_prefix_all + "%",
+                    },
+                ).scalar_one(),
+                "dim_material": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM dim_material
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                          AND source_record_id LIKE :prefix
+                        """
+                    ),
+                    {
+                        "tenant_id": params.tenant_id,
+                        "project_id": params.project_id,
+                        "prefix": dataset_prefix_all + "%",
+                    },
+                ).scalar_one(),
+                "metric_lineage": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM metric_lineage
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                        """
+                    ),
+                    {"tenant_id": params.tenant_id, "project_id": params.project_id},
+                ).scalar_one(),
+                "fact_production_daily": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM fact_production_daily
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                          AND source_record_id LIKE :prefix
+                        """
+                    ),
+                    {
+                        "tenant_id": params.tenant_id,
+                        "project_id": params.project_id,
+                        "prefix": dataset_prefix_all + "%",
+                    },
+                ).scalar_one(),
+                "fact_energy_daily": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM fact_energy_daily
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                          AND source_record_id LIKE :prefix
+                        """
+                    ),
+                    {
+                        "tenant_id": params.tenant_id,
+                        "project_id": params.project_id,
+                        "prefix": dataset_prefix_all + "%",
+                    },
+                ).scalar_one(),
+                "fact_cost_daily": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM fact_cost_daily
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                          AND source_record_id LIKE :prefix
+                        """
+                    ),
+                    {
+                        "tenant_id": params.tenant_id,
+                        "project_id": params.project_id,
+                        "prefix": dataset_prefix_all + "%",
+                    },
+                ).scalar_one(),
+                "fact_alarm_event": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM fact_alarm_event
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                          AND source_record_id LIKE :prefix
+                        """
+                    ),
+                    {
+                        "tenant_id": params.tenant_id,
+                        "project_id": params.project_id,
+                        "prefix": dataset_prefix_all + "%",
+                    },
+                ).scalar_one(),
+                "fact_maintenance_workorder": conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM fact_maintenance_workorder
+                        WHERE tenant_id = :tenant_id AND project_id = :project_id
+                          AND source_record_id LIKE :prefix
+                        """
+                    ),
+                    {
+                        "tenant_id": params.tenant_id,
+                        "project_id": params.project_id,
+                        "prefix": dataset_prefix_all + "%",
+                    },
+                ).scalar_one(),
+            }
+
             return {
                 "inserted": inserted,
-                "edge_evidence": [
-                    {
-                        "edge_type": e.edge_type,
-                        "table": e.table,
-                        "primary_key": e.primary_key,
-                        "time_range": e.time_range,
-                        "business_date": e.business_date,
-                    }
-                    for e in evidence
-                ],
+                "written_counts": written_counts,
+                "edge_evidence": [e.model_dump() for e in evidence],
             }
 
     except Exception as e:
@@ -961,10 +1121,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--events-per-day", type=int, default=None)
     parser.add_argument("--workorders-count", type=int, default=None)
     parser.add_argument("--dataset-version", type=str, default=None)
-    parser.add_argument("--edge-missing-enabled", type=lambda s: s.lower() == "true", default=None)
-    parser.add_argument("--edge-delay-enabled", type=lambda s: s.lower() == "true", default=None)
-    parser.add_argument("--edge-duplicate-enabled", type=lambda s: s.lower() == "true", default=None)
-    parser.add_argument("--edge-extreme-enabled", type=lambda s: s.lower() == "true", default=None)
+    parser.add_argument("--edge-missing-enabled", type=_parse_bool_cli, default=None)
+    parser.add_argument("--edge-delay-enabled", type=_parse_bool_cli, default=None)
+    parser.add_argument("--edge-duplicate-enabled", type=_parse_bool_cli, default=None)
+    parser.add_argument("--edge-extreme-enabled", type=_parse_bool_cli, default=None)
     parser.add_argument("--edge-missing-count", type=int, default=None)
     parser.add_argument("--edge-delay-count", type=int, default=None)
     parser.add_argument("--edge-duplicate-count", type=int, default=None)
@@ -981,10 +1141,10 @@ def main() -> int:
         # Connection check with structured error.
         engine = create_engine(database_url, pool_pre_ping=True)
         try:
-            with engine.connect():
-                pass
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
         except Exception as e:
-            raise UpstreamUnavailableError("Postgres", cause=str(e))
+            raise map_db_error(e)
 
         result = seed_database(database_url=database_url, params=params)
         print(
@@ -999,6 +1159,7 @@ def main() -> int:
                     "days": params.days,
                     "dataset_version": params.edge_cases.dataset_version,
                     "inserted": result["inserted"],
+                    "written_counts": result["written_counts"],
                     "edge_evidence": result["edge_evidence"],
                 },
                 ensure_ascii=False,
